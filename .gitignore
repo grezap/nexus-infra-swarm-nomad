@@ -1,0 +1,58 @@
+# Packer
+packer_cache/
+output-*/
+*.vmx.lck
+*.vmdk.lck
+*.vmem
+*.vmss
+*.nvram
+*.log
+crash.log
+
+# Terraform
+.terraform/
+.terraform.lock.hcl
+terraform.tfstate
+terraform.tfstate.backup
+terraform.tfstate.*.backup
+*.tfvars
+!example.tfvars
+
+# Ansible
+*.retry
+.vault_pass
+
+# Secrets
+*.pem
+*.key
+!files/**/*.pub
+.env
+.env.local
+
+# Windows product keys — defense in depth (see docs/licensing.md, ADR-0144)
+# Autounattend.xml is rendered from Autounattend.xml.tpl at Packer build time
+# and contains the product key inline. Never commit the rendered form.
+**/Autounattend.xml
+!**/Autounattend.xml.tpl
+# Owner-local Packer var files (may contain key references or bootstrap paths)
+*.pkrvars.hcl
+!example.pkrvars.hcl
+# Pre-Phase-0.D bootstrap secret store
+windows-keys.json
+.nexus/
+secrets/
+
+# VM artifacts (built images)
+artifacts/
+*.iso
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo

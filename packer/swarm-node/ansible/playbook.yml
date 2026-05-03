@@ -1,0 +1,33 @@
+---
+# swarm-node — Ansible playbook (local, run by Packer ansible-local provisioner)
+#
+# Same shape as nexus-infra-vmware/packer/{deb13,vault}/ansible/playbook.yml.
+# Four shared nexus_* roles run first, then swarm_node installs Docker CE,
+# Nomad, Consul, the firstboot script + systemd units, and the base config
+# templates (rendered to consul.hcl + nomad.hcl by firstboot in correct
+# server-vs-client mode).
+#
+# Order: nexus_identity (sshd) -> nexus_network (NIC rename) -> nexus_firewall
+# (rules need nic0/nic1 to exist) -> nexus_observability (node_exporter
+# binding uses the renamed NIC) -> swarm_node (assumes the baseline is up).
+
+- name: Configure swarm-node template (Phase 0.E.1)
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: true
+
+  vars:
+    target_user: "{{ target_user | default('nexusadmin') }}"
+    # Pass-through from Packer extra-vars to role-internal names
+    swarm_node_docker_channel: "{{ docker_channel | default('stable') }}"
+    swarm_node_nomad_version: "{{ nomad_version | default('1.9.3') }}"
+    swarm_node_consul_version: "{{ consul_version | default('1.20.1') }}"
+    swarm_node_hashicorp_arch: "{{ hashicorp_arch | default('linux_amd64') }}"
+
+  roles:
+    - nexus_identity
+    - nexus_network
+    - nexus_firewall
+    - nexus_observability
+    - swarm_node

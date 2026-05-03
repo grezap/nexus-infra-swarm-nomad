@@ -1,0 +1,6 @@
+---
+# nexus_network — defaults
+
+# Interface name produced by the systemd .link rename (OriginalName=en* →
+# this value). Must match the input interface in nftables.conf.
+nexus_network_nic_name: nic0

@@ -1,0 +1,41 @@
+# gitleaks config — nexus-infra-vmware
+#
+# Extends the default ruleset with a Microsoft product-key detector and a few
+# lab-specific allow-lists. See docs/licensing.md and ADR-0144.
+#
+# Run locally:   gitleaks detect --config .gitleaks.toml --source . --verbose
+# Run on a PR:   handled by .github/workflows/packer-validate.yml
+
+title = "nexus-infra-vmware gitleaks config"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id          = "microsoft-product-key"
+description = "Microsoft Windows / Office product key (5x5 alphanumeric groups)"
+regex       = '''\b[A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{5}\b'''
+tags        = ["key", "microsoft", "windows"]
+
+  [rules.allowlist]
+  description = "Placeholders in docs and templates are intentionally literal"
+  regexes = [
+    '''XXXXX-XXXXX-XXXXX-XXXXX-XXXXX''',
+    '''00000-00000-00000-00000-00000''',
+    '''\{\{\s*product_key\s*\}\}''',
+  ]
+  paths = [
+    '''(?i)docs/.*licensing\.md$''',
+    '''(?i).*\.tpl$''',
+    '''(?i)\.gitleaks\.toml$''',
+    '''(?i)scripts/check-no-product-key\.ps1$''',
+  ]
+
+[allowlist]
+description = "Repo-wide allowlist"
+paths = [
+  '''(?i)(^|/)CHANGELOG\.md$''',
+  '''(?i)(^|/)\.git/''',
+  '''(?i)packer_cache/''',
+  '''(?i)output-.*/''',
+]

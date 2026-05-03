@@ -1,0 +1,24 @@
+[Unit]
+Description=HashiCorp Nomad agent
+Documentation=https://www.nomadproject.io/
+Wants=network-online.target consul.service
+After=network-online.target consul.service swarm-node-firstboot.service
+ConditionFileNotEmpty=/etc/nomad.d/nomad.hcl
+
+[Service]
+# Worker mode overrides User=root via /etc/systemd/system/nomad.service.d/role.conf
+# (written by swarm-node-firstboot.sh) so the docker driver + cgroup mgmt works.
+# Manager mode runs as nomad user.
+User={{ swarm_node_nomad_user }}
+Group={{ swarm_node_nomad_group }}
+ExecStart=/usr/local/bin/nomad agent -config=/etc/nomad.d/nomad.hcl
+ExecReload=/bin/kill -HUP $MAINPID
+KillMode=process
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65536
+TasksMax=infinity
+OOMScoreAdjust=-1000
+
+[Install]
+WantedBy=multi-user.target

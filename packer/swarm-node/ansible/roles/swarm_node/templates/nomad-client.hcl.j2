@@ -1,0 +1,43 @@
+# nomad-client.hcl.tpl -- rendered by swarm-node-firstboot.sh on workers
+# (swarm-worker-1/2/3). Replaceable @MARKERS@:
+#   @HOSTNAME@      e.g. swarm-worker-1
+#   @VMNET11_IP@    e.g. 192.168.70.131
+#   @VMNET10_IP@    e.g. 192.168.10.131
+
+datacenter = "nexus-lab"
+data_dir   = "/opt/nomad/data"
+name       = "@HOSTNAME@"
+log_level  = "INFO"
+
+bind_addr = "@VMNET10_IP@"
+
+advertise {
+  http = "@VMNET10_IP@:4646"
+  rpc  = "@VMNET10_IP@:4647"
+  serf = "@VMNET10_IP@:4648"
+}
+
+client {
+  enabled = true
+  # Reserve a small slice for the host OS + Docker daemon + Consul agent
+  reserved {
+    cpu    = 200
+    memory = 512
+  }
+}
+
+# Co-located Consul agent on this node
+consul {
+  address = "127.0.0.1:8500"
+}
+
+# Docker driver -- Swarm + Nomad both run on the same Docker daemon, with
+# Swarm-managed services and Nomad-managed jobs sharing the engine.
+plugin "docker" {
+  config {
+    allow_privileged = false
+    volumes {
+      enabled = true
+    }
+  }
+}

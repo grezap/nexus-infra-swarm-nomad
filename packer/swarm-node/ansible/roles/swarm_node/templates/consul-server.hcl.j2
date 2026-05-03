@@ -1,0 +1,40 @@
+# consul-server.hcl.tpl -- rendered by swarm-node-firstboot.sh on managers
+# (swarm-manager-1/2/3). Replaceable @MARKERS@:
+#   @HOSTNAME@                 e.g. swarm-manager-1
+#   @VMNET11_IP@               e.g. 192.168.70.111  (clients/UI bind here)
+#   @VMNET10_IP@               e.g. 192.168.10.111  (Raft + LAN gossip here)
+#   @CONSUL_RETRY_JOIN_LIST@   '"192.168.10.111","192.168.10.112","192.168.10.113"'
+
+datacenter = "nexus-lab"
+data_dir   = "/opt/consul/data"
+node_name  = "@HOSTNAME@"
+log_level  = "INFO"
+
+# Server quorum across the 3 managers
+server                  = true
+bootstrap_expect        = 3
+ui_config { enabled     = true }
+
+# Bind LAN gossip + Raft to VMnet10 backplane; expose API/DNS on both NICs
+bind_addr     = "@VMNET10_IP@"
+advertise_addr = "@VMNET10_IP@"
+client_addr    = "0.0.0.0"
+
+ports {
+  http = 8500
+  dns  = 8600
+  grpc = 8502
+}
+
+# Auto-join the other managers via the canonical VMnet10 IPs
+retry_join = [@CONSUL_RETRY_JOIN_LIST@]
+
+# Service mesh / Connect -- TLS deferred to 0.E.5 (Vault PKI integration)
+connect {
+  enabled = true
+}
+
+# Performance tuning (small lab; conservative defaults)
+performance {
+  raft_multiplier = 1
+}

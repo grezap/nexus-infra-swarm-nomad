@@ -1,0 +1,118 @@
+name: packer-validate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  packer:
+    name: Packer validate (${{ matrix.template }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        template:
+          - swarm-node     # Phase 0.E.1
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-packer@v3
+        with:
+          version: "1.11.2"
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.config/packer/plugins
+          key: packer-plugins-${{ runner.os }}-${{ hashFiles('packer/**/*.pkr.hcl') }}
+          restore-keys: |
+            packer-plugins-${{ runner.os }}-
+
+      - name: packer init
+        working-directory: packer/${{ matrix.template }}
+        env:
+          PACKER_GITHUB_API_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: packer init .
+
+      - name: packer fmt -check
+        working-directory: packer/${{ matrix.template }}
+        run: packer fmt -check -recursive .
+
+      - name: packer validate
+        working-directory: packer/${{ matrix.template }}
+        run: packer validate -syntax-only .
+
+  terraform:
+    name: Terraform fmt + validate (${{ matrix.env }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        env:
+          - envs/swarm-nomad   # Phase 0.E.1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.8"
+      - name: terraform fmt -check (repo-wide, once per matrix leg)
+        run: terraform -chdir=terraform fmt -check -recursive
+      - name: terraform init (no backend)
+        run: terraform -chdir=terraform/${{ matrix.env }} init -backend=false
+      - name: terraform validate
+        run: terraform -chdir=terraform/${{ matrix.env }} validate
+
+  ansible-lint:
+    name: ansible-lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ansible-lint ansible
+      - run: ansible-lint packer/swarm-node/ansible/ packer/_shared/ansible/
+
+  shell-lint:
+    name: ShellCheck + PSScriptAnalyzer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: ShellCheck
+        uses: ludeeus/action-shellcheck@master
+        with:
+          scandir: ./scripts
+          severity: warning
+          ignore_names: '*.ps1'
+      - name: PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          Install-Module -Name PSScriptAnalyzer -Force -Scope CurrentUser
+          $issues = Invoke-ScriptAnalyzer -Path scripts -Recurse -Severity Warning,Error `
+            -ExcludeRule PSAvoidUsingWriteHost,PSUseShouldProcessForStateChangingFunctions
+          if ($issues) {
+            $issues | Format-Table -AutoSize | Out-String | Write-Host
+            $errors = $issues | Where-Object Severity -eq 'Error'
+            if ($errors) { throw "PSScriptAnalyzer: $($errors.Count) error(s)" }
+          } else {
+            Write-Host "PSScriptAnalyzer: clean"
+          }
+
+  gitleaks:
+    name: gitleaks (secret scan)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: gitleaks detect
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITLEAKS_CONFIG: ${{ github.workspace }}/.gitleaks.toml
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "false"
+          GITLEAKS_ENABLE_SUMMARY: "true"

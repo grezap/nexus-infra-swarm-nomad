@@ -1,0 +1,65 @@
+---
+# nexus_network — role tasks
+#
+# Networking baseline shared by every non-gateway NexusPlatform VM:
+#   - Persistent NIC rename `en* → nic0` via systemd .link (MAC-agnostic)
+#   - systemd-networkd DHCP config on the renamed interface
+#   - chrony client pointing at 192.168.70.1 (nexus-gateway)
+#
+# chrony.conf is expected at /tmp/chrony.conf — each template's Packer
+# pkr.hcl stages its own copy there (the public-pool fallback differs
+# between Debian and Ubuntu, so the file stays per-template).
+
+# ─── Persistent NIC naming ──────────────────────────────────────────────
+# Every clone gets exactly one NIC (VMnet11), attached by Terraform's
+# modules/vm/ at clone time. Rename rule is MAC-agnostic so the same template
+# serves any caller regardless of MAC. VMs that need multiple NICs (rare;
+# core services tier) override this post-clone with MAC-keyed .link files.
+- name: Deploy systemd .link file (renames ens* → {{ nexus_network_nic_name }})
+  ansible.builtin.copy:
+    dest: /etc/systemd/network/10-{{ nexus_network_nic_name }}.link
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [Match]
+      OriginalName=en*
+
+      [Link]
+      Name={{ nexus_network_nic_name }}
+
+- name: Deploy systemd-networkd .network file (DHCP on the renamed NIC)
+  ansible.builtin.copy:
+    dest: /etc/systemd/network/20-{{ nexus_network_nic_name }}.network
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [Match]
+      Name={{ nexus_network_nic_name }}
+
+      [Network]
+      DHCP=yes
+
+- name: Ensure systemd-networkd is enabled
+  ansible.builtin.systemd:
+    name: systemd-networkd
+    enabled: true
+    masked: false
+
+# ─── chrony client ───────────────────────────────────────────────────────
+- name: Install chrony client config (staged by Packer at /tmp/chrony.conf)
+  ansible.builtin.copy:
+    src: /tmp/chrony.conf
+    dest: /etc/chrony/chrony.conf
+    owner: root
+    group: root
+    mode: "0644"
+    remote_src: true
+  notify: Restart chrony
+
+- name: Enable + start chrony
+  ansible.builtin.systemd:
+    name: chrony
+    enabled: true
+    state: started

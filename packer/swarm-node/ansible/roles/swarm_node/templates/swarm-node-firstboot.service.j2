@@ -1,0 +1,16 @@
+[Unit]
+Description=swarm-node firstboot (NIC discovery, hostname mapping, Consul/Nomad config render)
+After=systemd-networkd.service network-online.target
+Wants=network-online.target
+Before=docker.service consul.service nomad.service
+ConditionPathExists=!/var/lib/swarm-node-firstboot-done
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/swarm-node-firstboot.sh
+RemainAfterExit=yes
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

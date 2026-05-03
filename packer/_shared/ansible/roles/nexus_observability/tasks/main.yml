@@ -1,0 +1,19 @@
+---
+# nexus_observability — role tasks
+#
+# Observability baseline for every non-gateway NexusPlatform VM.
+# Phase 0.B.3 step 2 scope: prometheus-node-exporter on :9100, scraped by
+# the Phase 0.I Prometheus tier once that's stood up.
+#
+# Room reserved here for future additions without needing another role:
+#   - OpenTelemetry Collector (Phase 0.I) — metrics/logs/traces fan-out
+#   - filebeat or vector (if we end up pushing syslog to Loki)
+#   - Cron'd smartctl/ipmitool exporters for VMs on real tin (Phase 2+)
+# All package installation is done by the OS-specific calling role so we
+# can batch apt operations (one dpkg lock acquisition per build).
+
+- name: Enable + start prometheus-node-exporter
+  ansible.builtin.systemd:
+    name: prometheus-node-exporter
+    enabled: true
+    state: started

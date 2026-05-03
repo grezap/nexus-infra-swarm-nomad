@@ -1,0 +1,30 @@
+# consul-client.hcl.tpl -- rendered by swarm-node-firstboot.sh on workers
+# (swarm-worker-1/2/3). Replaceable @MARKERS@:
+#   @HOSTNAME@                 e.g. swarm-worker-1
+#   @VMNET11_IP@               e.g. 192.168.70.131
+#   @VMNET10_IP@               e.g. 192.168.10.131
+#   @CONSUL_RETRY_JOIN_LIST@   manager VMnet10 IPs
+
+datacenter = "nexus-lab"
+data_dir   = "/opt/consul/data"
+node_name  = "@HOSTNAME@"
+log_level  = "INFO"
+
+# Client agent only -- no server flag, no bootstrap_expect
+server = false
+
+bind_addr      = "@VMNET10_IP@"
+advertise_addr = "@VMNET10_IP@"
+client_addr    = "127.0.0.1"
+
+ports {
+  http = 8500
+  dns  = 8600
+  grpc = 8502
+}
+
+retry_join = [@CONSUL_RETRY_JOIN_LIST@]
+
+connect {
+  enabled = true
+}

@@ -1,0 +1,89 @@
+---
+# nexus_identity — role tasks
+#
+# Identical across debian_base and ubuntu_base (verified at Phase 0.B.3 step 2
+# by diffing the two roles). Centralized here so future OS base roles only
+# need to ship their OS-specific tail (package names, unattended-upgrades
+# origin, MOTD banner text).
+#
+#   - Owner's SSH public key → nexusadmin's authorized_keys (if present)
+#   - Hardened sshd config (PermitRootLogin no, AllowAgentForwarding no, …)
+#   - ssh.service drop-in that regenerates host keys on first boot
+#
+# The `target_user` variable is set by the calling playbook (deb13/ubuntu24
+# pkr.hcl pass it via ansible-local extra-vars).
+
+# ─── Owner public key (optional) ─────────────────────────────────────────
+# The pubkey lives in this shared role's files/. If it's missing (e.g.
+# somebody stripped it before publishing), the build still succeeds —
+# Phase 0.D Vault SSH CA takes over identity later anyway.
+- name: Check for owner's SSH public key (optional)
+  ansible.builtin.stat:
+    path: "{{ role_path }}/files/nexusadmin.pub"
+  register: nexus_identity_pub
+
+- name: Ensure ~/.ssh exists for {{ target_user }}
+  ansible.builtin.file:
+    path: "/home/{{ target_user }}/.ssh"
+    state: directory
+    owner: "{{ target_user }}"
+    group: "{{ target_user }}"
+    mode: "0700"
+  when: nexus_identity_pub.stat.exists
+
+- name: Install owner's public key into authorized_keys
+  ansible.posix.authorized_key:
+    user: "{{ target_user }}"
+    key: "{{ lookup('ansible.builtin.file', role_path + '/files/nexusadmin.pub') }}"
+    state: present
+    exclusive: false
+  when: nexus_identity_pub.stat.exists
+
+# ─── SSH host-key regeneration on first boot ────────────────────────────
+# Packer cleanup wipes /etc/ssh/ssh_host_* so every clone gets unique keys.
+# Both Debian 13 and Ubuntu 24.04 ship a stock ssh.service with an
+# `ExecStartPre=/usr/sbin/sshd -t` that fails fatally without host keys.
+# systemd drop-ins APPEND ExecStartPre entries (they don't prepend), so we
+# clear the inherited list with a bare `ExecStartPre=`, then re-declare in
+# order: regen first (idempotent — no-op after boot 1), then the validation.
+# See docs/deb13.md → "SSH host keys" for the discovery story.
+- name: Ensure ssh.service drop-in dir exists
+  ansible.builtin.file:
+    path: /etc/systemd/system/ssh.service.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Drop-in — regenerate host keys before sshd -t
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/ssh.service.d/10-regenerate-host-keys.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [Service]
+      # Clear inherited ExecStartPre list, then re-declare in order:
+      ExecStartPre=
+      ExecStartPre=-/usr/bin/ssh-keygen -A
+      ExecStartPre=/usr/sbin/sshd -t
+
+# ─── SSH hardening ───────────────────────────────────────────────────────
+# Keep password auth enabled during Packer build so Packer can log in.
+# Phase 0.D's post-Vault run swaps to key-only + disables password.
+- name: Harden SSH (server-side minimums)
+  ansible.builtin.blockinfile:
+    path: /etc/ssh/sshd_config.d/10-nexus-hardening.conf
+    create: true
+    owner: root
+    group: root
+    mode: "0644"
+    block: |
+      PermitRootLogin no
+      X11Forwarding no
+      AllowAgentForwarding no
+      MaxAuthTries 3
+      LoginGraceTime 20
+      ClientAliveInterval 60
+      ClientAliveCountMax 3
+  notify: Restart ssh

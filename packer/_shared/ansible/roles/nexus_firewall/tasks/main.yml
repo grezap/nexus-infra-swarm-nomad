@@ -1,0 +1,28 @@
+---
+# nexus_firewall — role tasks
+#
+# nftables baseline shared by every non-gateway NexusPlatform VM.
+# The ruleset file itself (files/nftables.conf) is staged by each template's
+# Packer pkr.hcl to /tmp/nftables.conf before ansible-local runs. Keeping
+# the ruleset per-template leaves room for role overlays to ship stricter
+# rulesets without forking this role.
+
+- name: Install nftables baseline ruleset (staged by Packer at /tmp/nftables.conf)
+  ansible.builtin.copy:
+    src: /tmp/nftables.conf
+    dest: /etc/nftables.conf
+    owner: root
+    group: root
+    mode: "0755"
+    remote_src: true
+  notify: Restart nftables
+
+- name: Validate nftables ruleset
+  ansible.builtin.command: nft -c -f /etc/nftables.conf
+  changed_when: false
+
+- name: Enable + start nftables
+  ansible.builtin.systemd:
+    name: nftables
+    enabled: true
+    state: started

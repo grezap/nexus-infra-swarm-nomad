@@ -1,0 +1,21 @@
+---
+# swarm_node role defaults
+swarm_node_docker_channel: stable
+swarm_node_nomad_version: "1.9.3"
+swarm_node_consul_version: "1.20.1"
+swarm_node_hashicorp_arch: linux_amd64
+
+swarm_node_consul_user: consul
+swarm_node_consul_group: consul
+swarm_node_consul_data_dir: /opt/consul/data
+swarm_node_consul_config_dir: /etc/consul.d
+
+swarm_node_nomad_user: nomad
+swarm_node_nomad_group: nomad
+swarm_node_nomad_data_dir: /opt/nomad/data
+swarm_node_nomad_config_dir: /etc/nomad.d
+
+# Used by the consul + nomad config templates to know which NICs/IPs to bind.
+# The firstboot script overrides these at clone-time via sed @MARKER@ replace.
+swarm_node_vmnet11_iface: nic0
+swarm_node_vmnet10_iface: nic1

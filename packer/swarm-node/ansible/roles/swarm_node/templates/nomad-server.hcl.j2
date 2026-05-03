@@ -1,0 +1,37 @@
+# nomad-server.hcl.tpl -- rendered by swarm-node-firstboot.sh on managers
+# (swarm-manager-1/2/3). Replaceable @MARKERS@:
+#   @HOSTNAME@      e.g. swarm-manager-1
+#   @VMNET11_IP@    e.g. 192.168.70.111
+#   @VMNET10_IP@    e.g. 192.168.10.111  (Nomad raft + serf bind here)
+
+datacenter = "nexus-lab"
+data_dir   = "/opt/nomad/data"
+name       = "@HOSTNAME@"
+log_level  = "INFO"
+
+bind_addr = "@VMNET10_IP@"
+
+advertise {
+  http = "@VMNET10_IP@:4646"
+  rpc  = "@VMNET10_IP@:4647"
+  serf = "@VMNET10_IP@:4648"
+}
+
+server {
+  enabled          = true
+  bootstrap_expect = 3
+}
+
+# Co-located Consul agent on this node provides service discovery + auto-join
+consul {
+  address = "127.0.0.1:8500"
+}
+
+# UI on the management interface (VMnet11) for operator access
+ports {
+  http = 4646
+  rpc  = 4647
+  serf = 4648
+}
+
+# ACLs / TLS deferred to 0.E.5 (Vault PKI integration)

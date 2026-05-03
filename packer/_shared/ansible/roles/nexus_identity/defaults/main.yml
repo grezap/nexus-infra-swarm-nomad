@@ -1,0 +1,12 @@
+---
+# nexus_identity — defaults
+#
+# Shared role: owner SSH pubkey + sshd hardening + ssh host-key regen drop-in.
+# Consumed by debian_base and ubuntu_base.
+
+nexus_identity_target_user: nexusadmin
+
+# CIDR allowed to SSH into this template's clones. VMnet11 (192.168.70.0/24)
+# is the lab management plane. Kept as a variable so specific-purpose role
+# overlays (e.g. a bastion tier with a wider CIDR) can shrink or widen it.
+nexus_identity_ssh_allow_cidr: 192.168.70.0/24
