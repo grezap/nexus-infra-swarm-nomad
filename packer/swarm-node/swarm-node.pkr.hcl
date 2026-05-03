@@ -173,7 +173,15 @@ build {
       "/usr/bin/docker --version",
       "/usr/local/bin/nomad version | head -1",
       "/usr/local/bin/consul version | head -1",
-      "systemctl is-enabled docker",
+      # docker.service is INTENTIONALLY DISABLED at template time so it doesn't
+      # start before swarm-node-firstboot.service has set up NIC config + the
+      # iptables-baseline-vs-nftables interaction is decided. firstboot does
+      # `systemctl enable --now docker.service` after rendering its config.
+      # We just verify the unit got registered (apt install of docker-ce
+      # delivers /lib/systemd/system/docker.service) -- `systemctl cat` exits 0
+      # if the unit exists in any unit-file lookup path, regardless of enable
+      # state, and exits non-zero if the unit is unknown.
+      "systemctl cat docker.service > /dev/null",
       "systemctl is-enabled swarm-node-firstboot",
       "systemctl is-enabled ssh",
       "systemctl is-enabled nftables",
