@@ -10,6 +10,8 @@ Tier-2 orchestration for the **NexusPlatform 66-VM lab** — a 3+3 Docker Swarm 
 
 > **Canon:** This repo implements [Phase 0.E](https://github.com/grezap/nexus-platform-plan/blob/main/MASTER-PLAN.md) (line 151) of the NexusPlatform blueprint. Read [`nexus-platform-plan`](https://github.com/grezap/nexus-platform-plan) first.
 >
+> **New to Docker Swarm / Nomad / Consul / Portainer?** See the [tool stack glossary](https://github.com/grezap/nexus-platform-plan/blob/main/docs/glossary.md#3-container-orchestration) for plain-English definitions of each.
+>
 > **Current state (Phase 0.E.1 in progress):** `swarm-node` Packer template (Docker CE + Nomad + Consul baked, firstboot script renames hostname/NICs from MAC, renders per-role config) · `swarm-nomad` env composing six clones (3 managers + 3 workers per [`vms.yaml`](https://github.com/grezap/nexus-platform-plan/blob/main/docs/infra/vms.yaml) lines 182–191) · `role-overlay-swarm-init.tf` brings up the cluster after clones land (init mgr-1, join mgr-2/3 + wrk-1/2/3). Packer template build + first cycle apply pending operator-driven run.
 
 ## What's in here
