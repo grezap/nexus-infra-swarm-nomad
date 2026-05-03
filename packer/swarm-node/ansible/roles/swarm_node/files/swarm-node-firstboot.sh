@@ -234,17 +234,32 @@ chmod 640 "$NOMAD_DST"
 echo "$LOG_PREFIX rendered $NOMAD_DST ($ROLE mode)"
 
 # ─── 8. Enable + start runtime services ────────────────────────────────────
+# CRITICAL: use `systemctl start --no-block` here, NOT `enable --now`.
+#
+# Why: this script runs INSIDE swarm-node-firstboot.service, whose unit file
+# declares `Before=docker.service consul.service nomad.service` (defense-in-
+# depth so the daemons can never start before firstboot has rendered their
+# configs). `enable --now docker.service` translates to enable + start, and
+# the `--now` flag blocks until docker.service reaches "active" state.
+# But docker can't become active until firstboot.service reaches "active"
+# (Before= constraint), and firstboot can't finish because we're blocked on
+# `--now`. Deadlock -- the `start` process spins forever, the firstboot
+# service stays "activating" indefinitely, downstream readiness probes
+# (terraform null_resource.swarm_ready_probe) time out and the apply fails.
+# Diagnosed 2026-05-03 first cycle apply -- 46 min spinning before timeout.
+#
+# Fix: enable (registers the wanted-by symlink, returns immediately) +
+# start --no-block (queues the start request, returns immediately). Once
+# this script touches the marker and exits, systemd's oneshot+RemainAfterExit
+# reaches "active", the queued starts proceed in dependency order
+# (consul before nomad per nomad.service's `After=consul.service`).
 systemctl daemon-reload
-systemctl enable --now docker.service
-systemctl enable --now consul.service
-systemctl enable --now nomad.service
+systemctl enable docker.service consul.service nomad.service
+systemctl start --no-block docker.service consul.service nomad.service
 
-# Wait briefly for daemons to settle (apply doesn't block on this; cluster
-# bring-up overlay has its own ready-probes).
-sleep 3
-echo "$LOG_PREFIX docker.service: $(systemctl is-active docker.service)"
-echo "$LOG_PREFIX consul.service: $(systemctl is-active consul.service)"
-echo "$LOG_PREFIX nomad.service:  $(systemctl is-active nomad.service)"
+# Don't probe is-active here -- the daemons start AFTER this script exits.
+# The terraform swarm_ready_probe overlay handles readiness verification.
+echo "$LOG_PREFIX docker.service / consul.service / nomad.service queued (will start after firstboot completes)"
 
 # ─── 9. Mark complete ──────────────────────────────────────────────────────
 touch "$MARKER"
