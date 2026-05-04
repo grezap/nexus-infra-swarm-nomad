@@ -74,10 +74,13 @@ resource "null_resource" "swarm_vault_agent" {
     # the secret-id) -- read mtime via the file_hash trick: terraform
     # filesha256 changes when the file content changes (security env updates
     # secret-id on each apply).
-    creds_file_path    = "${local.vault_agent_creds_dir_expanded}/vault-agent-${each.key}.json"
-    swarm_init_id      = null_resource.swarm_init_and_join[0].id
-    vault_version      = var.vault_agent_version
-    swarm_va_overlay_v = "1"
+    creds_file_path = "${local.vault_agent_creds_dir_expanded}/vault-agent-${each.key}.json"
+    swarm_init_id   = null_resource.swarm_init_and_join[0].id
+    vault_version   = var.vault_agent_version
+    # Capture the sidecar's content hash so terraform re-runs when the
+    # security env regenerates the secret-id (every apply rotates it).
+    creds_file_hash    = filesha256("${local.vault_agent_creds_dir_expanded}/vault-agent-${each.key}.json")
+    swarm_va_overlay_v = "2" # v2 = ERROR-on-missing-creds (was WARN+skip; v1 silently exited 0 when the security env's first apply produced wrongly-named sidecars, leaving terraform thinking the resource was created when it had skipped); also added creds_file_hash trigger so re-applies pick up rotated secret-ids. v1 = original.
 
     # Captured here for the destroy provisioner -- terraform restricts
     # destroy provisioners to `self`, `count.index`, and `each.key`. We
@@ -102,9 +105,12 @@ resource "null_resource" "swarm_vault_agent" {
       $sshUser        = '${var.swarm_node_user}'
 
       # Pre-flight: AppRole creds JSON must exist (security env writes it).
+      # ERROR (not WARN+skip) -- silent skip on missing creds was the root
+      # cause of a 0.E.2.1 cycle where 6 agents were "created" in tf state
+      # without /etc/vault-agent/ existing on the nodes (Vault Agent never
+      # installed; downstream gossip-encrypt overlay hit `tee: No such file`).
       if (-not (Test-Path $credsFile)) {
-        Write-Host "[swarm-va $hostName] WARN: creds file $credsFile missing -- run security env apply first; SKIPPING."
-        exit 0
+        throw "[swarm-va $hostName] creds file $credsFile missing -- run nexus-infra-vmware/scripts/security.ps1 apply FIRST to provision the 6 AppRole sidecars."
       }
       $creds = Get-Content $credsFile | ConvertFrom-Json
       $roleId   = $creds.role_id
