@@ -228,3 +228,15 @@ variable "enable_consul_gossip_encryption" {
   type        = bool
   default     = true
 }
+
+variable "enable_consul_tls" {
+  description = "Phase 0.E.2.2 toggle: per-node TLS leaf cert from Vault PKI consul-server role + Consul tls{} block + HARD-CUT HTTP->HTTPS (port 8500 disabled, 8501 only). Sequential rolling restart across the 6 agents. Default true. Set false to keep cluster on plain HTTP/8500 (lab-only); otherwise this lands the production-shape mutual TLS for internal RPC + Raft, plus server-side TLS for the operator HTTPS API."
+  type        = bool
+  default     = true
+}
+
+variable "vault_pki_consul_role_name" {
+  description = "Name of the Vault PKI role under pki_int/ that issues Consul leaf certs. Mirrors nexus-infra-vmware/terraform/envs/security/variables.tf default; both envs must agree on the role name. Used by 0.E.2.2 Vault Agent template's pkiCert call."
+  type        = string
+  default     = "consul-server"
+}
