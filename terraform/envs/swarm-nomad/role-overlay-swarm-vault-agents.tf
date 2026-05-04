@@ -147,6 +147,19 @@ resource "null_resource" "swarm_vault_agent" {
       # Mirrors the consul/nomad install pattern from the swarm_node Ansible role.
       $installScript = @"
 set -euo pipefail
+
+# Step 2.0: ensure DNS resolution works before any outbound HTTP.
+# The deb13 baseline used dhcpcd at Packer-build time, then switched to
+# systemd-networkd at clone time without enabling systemd-resolved -- result:
+# /etc/resolv.conf may be empty (or a stale dhcpcd header) on fresh clones,
+# and curl returns "Could not resolve host". Cluster ops use direct IPs so
+# this only surfaces when something does outbound HTTP for the first time.
+# nexus-gateway's dnsmasq is the canonical lab resolver at 192.168.70.1.
+if ! getent hosts releases.hashicorp.com >/dev/null 2>&1; then
+  echo "[swarm-va install] /etc/resolv.conf has no working resolver; pointing at nexus-gateway dnsmasq"
+  echo "nameserver 192.168.70.1" | sudo tee /etc/resolv.conf > /dev/null
+fi
+
 if [ -x /usr/local/bin/vault ] && /usr/local/bin/vault version 2>/dev/null | grep -qF "Vault v$vaultVersion"; then
   echo "vault binary v$vaultVersion already installed"
 else
