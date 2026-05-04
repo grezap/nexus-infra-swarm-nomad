@@ -4,7 +4,7 @@
 [![Terraform](https://img.shields.io/badge/Terraform-1.9+-purple)](https://www.terraform.io/)
 [![License](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
 [![Blueprint](https://img.shields.io/badge/blueprint-nexus--platform--plan%20v0.1.3-orange)](https://github.com/grezap/nexus-platform-plan)
-[![Phase](https://img.shields.io/badge/phase-0.E.1%20in%20progress-yellow)](./CHANGELOG.md)
+[![Phase](https://img.shields.io/badge/phase-0.E.1%20closed%20%E2%80%A2%200.E.2%20next-brightgreen)](./CHANGELOG.md)
 
 Tier-2 orchestration for the **NexusPlatform 66-VM lab** — a 3+3 Docker Swarm cluster with co-located Nomad servers + Consul servers on the managers and Nomad/Consul clients on the workers, plus Portainer EE deployed as a clustered Swarm service. Sits on top of the [`nexus-infra-vmware`](https://github.com/grezap/nexus-infra-vmware) foundation (Vault, AD, gateway).
 
@@ -12,7 +12,7 @@ Tier-2 orchestration for the **NexusPlatform 66-VM lab** — a 3+3 Docker Swarm 
 >
 > **New to Docker Swarm / Nomad / Consul / Portainer?** See the [tool stack glossary](https://github.com/grezap/nexus-platform-plan/blob/main/docs/glossary.md#3-container-orchestration) for plain-English definitions of each.
 >
-> **Current state (Phase 0.E.1 in progress):** `swarm-node` Packer template (Docker CE + Nomad + Consul baked, firstboot script renames hostname/NICs from MAC, renders per-role config) · `swarm-nomad` env composing six clones (3 managers + 3 workers per [`vms.yaml`](https://github.com/grezap/nexus-platform-plan/blob/main/docs/infra/vms.yaml) lines 182–191) · `role-overlay-swarm-init.tf` brings up the cluster after clones land (init mgr-1, join mgr-2/3 + wrk-1/2/3). Packer template build + first cycle apply pending operator-driven run.
+> **Current state (Phase 0.E.1 ✅ closed; 0.E.2 Consul harden up next):** `swarm-node` Packer template (Docker CE 29.4 + Nomad 1.9.3 + Consul 1.20.1 baked, firstboot maps NICs/hostnames from MAC, renders per-role config) · `swarm-nomad` env composing six clones (3 managers + 3 workers per [`vms.yaml`](https://github.com/grezap/nexus-platform-plan/blob/main/docs/infra/vms.yaml) lines 182–191) · `role-overlay-swarm-init.tf` brings up the cluster (init mgr-1, join mgr-2/3 + wrk-1/2/3) · 28-check smoke gate ALL GREEN. Master-plan exit gate met: `docker node ls` = 6, `nomad server members` = 3, `consul members` = 6 (3 server + 3 client, raft quorate).
 
 ## What's in here
 
