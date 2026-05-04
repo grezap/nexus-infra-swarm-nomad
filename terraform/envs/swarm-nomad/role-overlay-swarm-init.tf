@@ -112,7 +112,7 @@ resource "null_resource" "swarm_init_and_join" {
   triggers = {
     ready_id       = null_resource.swarm_ready_probe[0].id
     leader_vmnet10 = local.swarm_leader_vmnet10
-    init_overlay_v = "1"
+    init_overlay_v = "2" # v2 = `-eq 'active'` (was `-match 'active'` -- substring regex matched 'inactive' as 'active' and skipped `docker swarm init`, leader never bootstrapped, token capture failed). v1 = original.
   }
 
   depends_on = [null_resource.swarm_ready_probe]
@@ -138,7 +138,7 @@ resource "null_resource" "swarm_init_and_join" {
       # ── Step 1: leader (mgr-1) ──
       $leaderState = Get-SwarmState -Ip $leaderIp
       Write-Host "[swarm init] $${leaderIp}: current swarm state = '$leaderState'"
-      if ($leaderState -match 'active') {
+      if ($leaderState -eq 'active') {
         Write-Host "[swarm init] $${leaderIp}: already in a swarm, skipping init"
       } else {
         Write-Host "[swarm init] $${leaderIp}: docker swarm init --advertise-addr $leaderVmnet10"
@@ -158,7 +158,7 @@ resource "null_resource" "swarm_init_and_join" {
       # ── Step 3: join mgr-2 + mgr-3 ──
       foreach ($mgrIp in $managerIps) {
         $state = Get-SwarmState -Ip $mgrIp
-        if ($state -match 'active') {
+        if ($state -eq 'active') {
           Write-Host "[swarm init] $${mgrIp}: already in a swarm, skipping join"
           continue
         }
@@ -175,7 +175,7 @@ resource "null_resource" "swarm_init_and_join" {
       # ── Step 4: join wrk-1/2/3 ──
       foreach ($wrkIp in $workerIps) {
         $state = Get-SwarmState -Ip $wrkIp
-        if ($state -match 'active') {
+        if ($state -eq 'active') {
           Write-Host "[swarm init] $${wrkIp}: already in a swarm, skipping join"
           continue
         }
