@@ -93,7 +93,7 @@ resource "null_resource" "swarm_vault_agent" {
     when        = create
     interpreter = ["pwsh", "-NoProfile", "-Command"]
     command     = <<-PWSH
-      $host           = '${each.key}'
+      $hostName           = '${each.key}'
       $vmIp           = '${each.value.vm_ip}'
       $role           = '${each.value.role}'
       $vaultVersion   = '${var.vault_agent_version}'
@@ -103,7 +103,7 @@ resource "null_resource" "swarm_vault_agent" {
 
       # Pre-flight: AppRole creds JSON must exist (security env writes it).
       if (-not (Test-Path $credsFile)) {
-        Write-Host "[swarm-va $host] WARN: creds file $credsFile missing -- run security env apply first; SKIPPING."
+        Write-Host "[swarm-va $hostName] WARN: creds file $credsFile missing -- run security env apply first; SKIPPING."
         exit 0
       }
       $creds = Get-Content $credsFile | ConvertFrom-Json
@@ -111,13 +111,13 @@ resource "null_resource" "swarm_vault_agent" {
       $secretId = $creds.secret_id
       $vaultAddr = $creds.vault_addr
       if (-not $roleId -or -not $secretId) {
-        throw "[swarm-va $host] creds JSON missing role_id or secret_id"
+        throw "[swarm-va $hostName] creds JSON missing role_id or secret_id"
       }
 
       # Pre-flight: CA bundle must exist (PKI root distributed to build host
       # in 0.D.2). The Vault Agent uses it to verify the vault server cert.
       if (-not (Test-Path $caBundlePath)) {
-        throw "[swarm-va $host] CA bundle $caBundlePath missing -- run security env apply (PKI distribute) first."
+        throw "[swarm-va $hostName] CA bundle $caBundlePath missing -- run security env apply (PKI distribute) first."
       }
 
       $sshOpts = @('-o','ConnectTimeout=10','-o','BatchMode=yes','-o','StrictHostKeyChecking=no')
@@ -125,11 +125,11 @@ resource "null_resource" "swarm_vault_agent" {
       # Step 1: probe -- already installed + active?
       $probe = (ssh @sshOpts "$sshUser@$vmIp" "test -x /usr/local/bin/vault && /usr/local/bin/vault version 2>/dev/null && systemctl is-active nexus-vault-agent.service 2>/dev/null" 2>&1 | Out-String).Trim()
       if ($probe -match "Vault v$vaultVersion" -and $probe -match '(?m)^active$') {
-        Write-Host "[swarm-va $host] already installed at v$vaultVersion + service active; skipping."
+        Write-Host "[swarm-va $hostName] already installed at v$vaultVersion + service active; skipping."
         exit 0
       }
 
-      Write-Host "[swarm-va $host] installing Vault Agent v$vaultVersion (role=$role)"
+      Write-Host "[swarm-va $hostName] installing Vault Agent v$vaultVersion (role=$role)"
 
       # Step 2: install vault binary (skip if already at expected version)
       # Mirrors the consul/nomad install pattern from the swarm_node Ansible role.
@@ -160,7 +160,7 @@ sudo chmod 0755 /etc/vault-agent
       $installOut = ssh @sshOpts "$sshUser@$vmIp" "echo '$installB64' | base64 -d | bash" 2>&1 | Out-String
       if ($LASTEXITCODE -ne 0) {
         Write-Host $installOut.Trim()
-        throw "[swarm-va $host] vault binary install failed (rc=$LASTEXITCODE)"
+        throw "[swarm-va $hostName] vault binary install failed (rc=$LASTEXITCODE)"
       }
       Write-Host $installOut.Trim()
 
@@ -190,7 +190,7 @@ sudo rm -f /tmp/role-id /tmp/secret-id /tmp/ca-bundle.crt
         $stageOut = ssh @sshOpts "$sshUser@$vmIp" "echo '$stageB64' | base64 -d | bash" 2>&1 | Out-String
         if ($LASTEXITCODE -ne 0) {
           Write-Host $stageOut.Trim()
-          throw "[swarm-va $host] credential staging failed (rc=$LASTEXITCODE)"
+          throw "[swarm-va $hostName] credential staging failed (rc=$LASTEXITCODE)"
         }
       } finally {
         Remove-Item $roleIdTmp.FullName -Force -ErrorAction SilentlyContinue
@@ -276,7 +276,7 @@ sudo systemctl enable --now nexus-vault-agent.service
       $finalOut = ssh @sshOpts "$sshUser@$vmIp" "echo '$finalB64' | base64 -d | bash" 2>&1 | Out-String
       if ($LASTEXITCODE -ne 0) {
         Write-Host $finalOut.Trim()
-        throw "[swarm-va $host] config/service setup failed (rc=$LASTEXITCODE)"
+        throw "[swarm-va $hostName] config/service setup failed (rc=$LASTEXITCODE)"
       }
       Write-Host $finalOut.Trim()
 
@@ -292,18 +292,18 @@ sudo systemctl enable --now nexus-vault-agent.service
       if (-not $serviceActive) {
         $journal = (ssh @sshOpts "$sshUser@$vmIp" "sudo journalctl -u nexus-vault-agent.service --no-pager -n 30" 2>&1 | Out-String)
         Write-Host $journal
-        throw "[swarm-va $host] nexus-vault-agent.service failed to reach active within 30s"
+        throw "[swarm-va $hostName] nexus-vault-agent.service failed to reach active within 30s"
       }
-      Write-Host "[swarm-va $host] nexus-vault-agent.service active"
+      Write-Host "[swarm-va $hostName] nexus-vault-agent.service active"
 
       # Token sink populated? (proves AppRole auth succeeded)
       $tokenCheck = (ssh @sshOpts "$sshUser@$vmIp" "sudo test -s /var/run/nexus-vault-agent/token && echo TOKEN_PRESENT" 2>&1 | Out-String).Trim()
       if ($tokenCheck -notmatch 'TOKEN_PRESENT') {
         $journal = (ssh @sshOpts "$sshUser@$vmIp" "sudo journalctl -u nexus-vault-agent.service --no-pager -n 30" 2>&1 | Out-String)
         Write-Host $journal
-        throw "[swarm-va $host] AppRole login appears to have failed (token sink empty)"
+        throw "[swarm-va $hostName] AppRole login appears to have failed (token sink empty)"
       }
-      Write-Host "[swarm-va $host] AppRole authenticated; token sink populated"
+      Write-Host "[swarm-va $hostName] AppRole authenticated; token sink populated"
     PWSH
   }
 
@@ -315,7 +315,7 @@ sudo systemctl enable --now nexus-vault-agent.service
     when        = destroy
     interpreter = ["pwsh", "-NoProfile", "-Command"]
     command     = <<-PWSH
-      $host    = '${each.key}'
+      $hostName    = '${each.key}'
       $vmIp    = '${self.triggers.destroy_vm_ip}'
       $sshUser = '${self.triggers.destroy_ssh_user}'
       $sshOpts = @('-o','ConnectTimeout=5','-o','BatchMode=yes','-o','StrictHostKeyChecking=no')

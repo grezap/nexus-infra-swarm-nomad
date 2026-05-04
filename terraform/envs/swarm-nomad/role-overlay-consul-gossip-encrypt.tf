@@ -87,7 +87,7 @@ resource "null_resource" "consul_gossip_encrypt" {
       ) | Where-Object { $_ -ne $null }
 
       # Map host -> VMnet11 IP for SSH addressing
-      $hostMap = @{
+      $hostNameMap = @{
         'swarm-manager-1' = '192.168.70.111'
         'swarm-manager-2' = '192.168.70.112'
         'swarm-manager-3' = '192.168.70.113'
@@ -127,10 +127,10 @@ EOT
       $templateBytes = [System.Text.UTF8Encoding]::new($false).GetBytes($templateConfig)
       $templateB64   = [Convert]::ToBase64String($templateBytes)
 
-      foreach ($host in $applyOrder) {
-        $vmIp = $hostMap[$host]
+      foreach ($hostName in $applyOrder) {
+        $vmIp = $hostNameMap[$hostName]
         Write-Host ""
-        Write-Host "[gossip-encrypt $host] enrolling in encrypted gossip..."
+        Write-Host "[gossip-encrypt $hostName] enrolling in encrypted gossip..."
 
         # Step 1: drop the template config + restart vault-agent
         $stageScript = @"
@@ -146,7 +146,7 @@ sudo systemctl restart nexus-vault-agent.service
         $stageOut = ssh @sshOpts "$sshUser@$vmIp" "echo '$stageB64' | base64 -d | bash" 2>&1 | Out-String
         if ($LASTEXITCODE -ne 0) {
           Write-Host $stageOut.Trim()
-          throw "[gossip-encrypt $host] stage failed (rc=$LASTEXITCODE)"
+          throw "[gossip-encrypt $hostName] stage failed (rc=$LASTEXITCODE)"
         }
 
         # Step 2: wait for /etc/consul.d/10-encrypt.hcl to materialize
@@ -161,9 +161,9 @@ sudo systemctl restart nexus-vault-agent.service
         if (-not $rendered) {
           $journal = (ssh @sshOpts "$sshUser@$vmIp" "sudo journalctl -u nexus-vault-agent.service --no-pager -n 30" 2>&1 | Out-String)
           Write-Host $journal
-          throw "[gossip-encrypt $host] template never rendered /etc/consul.d/10-encrypt.hcl within 60s"
+          throw "[gossip-encrypt $hostName] template never rendered /etc/consul.d/10-encrypt.hcl within 60s"
         }
-        Write-Host "[gossip-encrypt $host] /etc/consul.d/10-encrypt.hcl rendered"
+        Write-Host "[gossip-encrypt $hostName] /etc/consul.d/10-encrypt.hcl rendered"
 
         # Step 3: wait for consul to be back up (Vault Agent's command
         # restarted it; takes ~5-10s to rejoin cluster)
@@ -183,9 +183,9 @@ sudo systemctl restart nexus-vault-agent.service
         if (-not $consulReady) {
           $journal = (ssh @sshOpts "$sshUser@$vmIp" "sudo journalctl -u consul.service --no-pager -n 30" 2>&1 | Out-String)
           Write-Host $journal
-          throw "[gossip-encrypt $host] consul.service didn't return to ready within 60s"
+          throw "[gossip-encrypt $hostName] consul.service didn't return to ready within 60s"
         }
-        Write-Host "[gossip-encrypt $host] consul rejoined (encrypted gossip active)"
+        Write-Host "[gossip-encrypt $hostName] consul rejoined (encrypted gossip active)"
       }
 
       Write-Host ""
@@ -195,7 +195,7 @@ sudo systemctl restart nexus-vault-agent.service
       # Final cluster-wide verification: keyring should show exactly 1 key
       # alive on all 6 agents. Use a temp var to avoid the PowerShell hashtable
       # indexer syntax colliding with terraform's heredoc interpolation parser.
-      $leaderProbeIp = $hostMap['swarm-manager-1']
+      $leaderProbeIp = $hostNameMap['swarm-manager-1']
       $keyringOut = (ssh @sshOpts "$sshUser@$leaderProbeIp" "consul keyring -list 2>&1" 2>&1 | Out-String)
       Write-Host $keyringOut.Trim()
       if ($keyringOut -notmatch '6/6') {
@@ -213,13 +213,13 @@ sudo systemctl restart nexus-vault-agent.service
     command     = <<-PWSH
       $sshUser = 'nexusadmin'
       $sshOpts = @('-o','ConnectTimeout=5','-o','BatchMode=yes','-o','StrictHostKeyChecking=no')
-      $hosts = @('swarm-manager-1','swarm-manager-2','swarm-manager-3','swarm-worker-1','swarm-worker-2','swarm-worker-3')
-      $hostMap = @{
+      $hostNames = @('swarm-manager-1','swarm-manager-2','swarm-manager-3','swarm-worker-1','swarm-worker-2','swarm-worker-3')
+      $hostNameMap = @{
         'swarm-manager-1' = '192.168.70.111'; 'swarm-manager-2' = '192.168.70.112'; 'swarm-manager-3' = '192.168.70.113'
         'swarm-worker-1'  = '192.168.70.131'; 'swarm-worker-2'  = '192.168.70.132'; 'swarm-worker-3'  = '192.168.70.133'
       }
-      foreach ($h in $hosts) {
-        $ip = $hostMap[$h]
+      foreach ($h in $hostNames) {
+        $ip = $hostNameMap[$h]
         Write-Host "[gossip-encrypt destroy] $${h}: removing template + rendered file + restarting consul"
         ssh @sshOpts "$sshUser@$ip" "sudo rm -f /etc/vault-agent/10-template-gossip.hcl /etc/consul.d/10-encrypt.hcl; sudo systemctl restart nexus-vault-agent.service consul.service" 2>$null
       }
