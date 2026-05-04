@@ -155,3 +155,76 @@ variable "swarm_cluster_timeout_minutes" {
   type        = number
   default     = 12
 }
+
+# ─── Phase 0.E.2 — Consul harden ──────────────────────────────────────────
+# Setup primitives (Vault Agent install on all 6 nodes) + sub-phase toggles
+# (0.E.2.1 gossip encrypt; 0.E.2.2 TLS lands here; 0.E.2.3 ACL lands here).
+# Cross-repo dependency: nexus-infra-vmware/terraform/envs/security must be
+# applied first to write the AppRole creds JSON sidecars + KV seed.
+
+variable "enable_swarm_vault_agents" {
+  description = "Master toggle for installing nexus-vault-agent.service on all 6 swarm-nodes (Phase 0.E.2 setup). Default true."
+  type        = bool
+  default     = true
+}
+
+variable "enable_swarm_manager_1_vault_agent" {
+  description = "Per-host Vault Agent toggle for swarm-manager-1. Default true (gated under enable_swarm_vault_agents)."
+  type        = bool
+  default     = true
+}
+
+variable "enable_swarm_manager_2_vault_agent" {
+  type    = bool
+  default = true
+}
+
+variable "enable_swarm_manager_3_vault_agent" {
+  type    = bool
+  default = true
+}
+
+variable "enable_swarm_worker_1_vault_agent" {
+  type    = bool
+  default = true
+}
+
+variable "enable_swarm_worker_2_vault_agent" {
+  type    = bool
+  default = true
+}
+
+variable "enable_swarm_worker_3_vault_agent" {
+  type    = bool
+  default = true
+}
+
+variable "vault_agent_version" {
+  description = "Vault binary version to install on each swarm-node (matches nexus-infra-vmware/packer/vault/variables.pkr.hcl `vault_version` default of 1.18.4)."
+  type        = string
+  default     = "1.18.4"
+}
+
+variable "vault_agent_swarm_creds_dir" {
+  description = "Directory on the build host where the 6 vault-agent-swarm-<host>.json sidecars live (written by nexus-infra-vmware security env). Each contains role_id + secret_id + CA path + vault address."
+  type        = string
+  default     = "$HOME/.nexus"
+}
+
+variable "vault_pki_ca_bundle_path" {
+  description = "Path on the build host to the Vault PKI root+intermediate CA bundle (written by nexus-infra-vmware security env at 0.D.2). Vault Agents on swarm nodes use this to verify the vault server cert."
+  type        = string
+  default     = "$HOME/.nexus/vault-ca-bundle.crt"
+}
+
+variable "vault_kv_mount_path" {
+  description = "Vault KV-v2 engine mount path. Templates pull `<mount>/data/swarm/...` paths."
+  type        = string
+  default     = "nexus"
+}
+
+variable "enable_consul_gossip_encryption" {
+  description = "Phase 0.E.2.1 toggle: drop Vault Agent template that renders /etc/consul.d/10-encrypt.hcl, restart consul to enroll in encrypted gossip. Sequential rolling apply across the 6 agents to preserve quorum. Default true."
+  type        = bool
+  default     = true
+}
