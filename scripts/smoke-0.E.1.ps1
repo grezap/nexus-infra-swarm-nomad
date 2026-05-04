@@ -158,8 +158,11 @@ Test-Check -Description "$leaderIp : consul members reports 6 alive members" -Pr
     $out -match '^6$'
 } | Out-Null
 
-Test-Check -Description "$leaderIp : consul operator raft list-peers reports 3 voters" -Probe {
-    $out = Invoke-RemoteCommand -Ip $leaderIp -Command "consul operator raft list-peers 2>&1 | grep -c voter || true"
+Test-Check -Description "$leaderIp : consul operator raft list-peers reports 3 peers" -Probe {
+    # Count rows with the canonical VMnet10 backplane IP prefix; the column
+    # header reads "Voter" (capital) and rows show "true", so plain
+    # `grep -c voter` is a probe bug -- counts neither header nor rows.
+    $out = Invoke-RemoteCommand -Ip $leaderIp -Command "consul operator raft list-peers | grep -c '192.168.10' || true"
     $out -match '^3$'
 } | Out-Null
 

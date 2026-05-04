@@ -11,6 +11,15 @@ log_level  = "INFO"
 
 bind_addr = "@VMNET10_IP@"
 
+# Override the HTTP bind specifically so `nomad server members` works from
+# localhost (and from the operator's VMnet11 build host) without setting
+# NOMAD_ADDR. raft (4647) + serf (4648) stay bound to VMnet10 only -- nftables
+# blocks them on other paths anyway, but defense-in-depth at the bind layer.
+# 0.0.0.0 here is safe because nftables on nic0 only opens 4646 from VMnet11.
+addresses {
+  http = "0.0.0.0"
+}
+
 advertise {
   http = "@VMNET10_IP@:4646"
   rpc  = "@VMNET10_IP@:4647"

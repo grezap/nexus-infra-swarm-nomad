@@ -11,6 +11,12 @@ log_level  = "INFO"
 
 bind_addr = "@VMNET10_IP@"
 
+# Override the HTTP bind for operator localhost access (see nomad-server.hcl
+# comment). raft + serf stay VMnet10-only.
+addresses {
+  http = "0.0.0.0"
+}
+
 advertise {
   http = "@VMNET10_IP@:4646"
   rpc  = "@VMNET10_IP@:4647"
