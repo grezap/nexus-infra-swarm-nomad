@@ -220,7 +220,7 @@ sudo systemctl restart nexus-vault-agent.service
       }
       foreach ($h in $hosts) {
         $ip = $hostMap[$h]
-        Write-Host "[gossip-encrypt destroy] $h: removing template + rendered file + restarting consul"
+        Write-Host "[gossip-encrypt destroy] $${h}: removing template + rendered file + restarting consul"
         ssh @sshOpts "$sshUser@$ip" "sudo rm -f /etc/vault-agent/10-template-gossip.hcl /etc/consul.d/10-encrypt.hcl; sudo systemctl restart nexus-vault-agent.service consul.service" 2>$null
       }
       exit 0

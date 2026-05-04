@@ -319,7 +319,7 @@ sudo systemctl enable --now nexus-vault-agent.service
       $vmIp    = '${self.triggers.destroy_vm_ip}'
       $sshUser = '${self.triggers.destroy_ssh_user}'
       $sshOpts = @('-o','ConnectTimeout=5','-o','BatchMode=yes','-o','StrictHostKeyChecking=no')
-      Write-Host "[swarm-va destroy] $host: stopping nexus-vault-agent + cleaning files"
+      Write-Host "[swarm-va destroy] $${host}: stopping nexus-vault-agent + cleaning files"
       ssh @sshOpts "$sshUser@$vmIp" "sudo systemctl disable --now nexus-vault-agent.service 2>/dev/null; sudo rm -rf /etc/vault-agent /var/run/nexus-vault-agent /var/log/nexus-vault-agent /etc/systemd/system/nexus-vault-agent.service; sudo systemctl daemon-reload" 2>$null
       exit 0
     PWSH
