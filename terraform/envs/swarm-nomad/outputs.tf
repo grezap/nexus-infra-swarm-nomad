@@ -33,32 +33,46 @@ output "swarm_node_vm_paths" {
 output "next_step" {
   description = "Operator crib -- what to do once apply is green."
   value       = <<-EOT
-    Phase 0.E.1 swarm cluster bring-up complete (if smoke gate is green).
+    Phase 0.E.2.1 closed (if smoke gate is green): swarm cluster live (0.E.1)
+    + Vault Agents + Consul gossip encryption.
 
-    Verify the exit gate (per MASTER-PLAN.md line 151):
+    Verify the master-plan exit gate (MASTER-PLAN.md line 151):
 
-      ssh nexusadmin@192.168.70.111 'docker node ls'
-      # Expect: 6 nodes (3 managers Leader/Reachable + 3 workers Active)
+      ssh nexusadmin@192.168.70.111 'docker node ls'         # 6 nodes
+      ssh nexusadmin@192.168.70.111 'consul members'         # 6 members
+      ssh nexusadmin@192.168.70.111 'nomad server members'   # 3 servers
 
-      ssh nexusadmin@192.168.70.111 'consul members'
-      # Expect: 6 members (3 server + 3 client)
+    Verify 0.E.2.1 gossip-encrypt is uniform across the cluster:
 
-      ssh nexusadmin@192.168.70.111 'nomad server members'
-      # Expect: 3 alive servers
+      ssh nexusadmin@192.168.70.111 'consul keyring -list'
+      # Expect: single base64 key with [6/6] in the LAN section.
 
-    Or run the full smoke gate:
+    Verify per-node Vault Agents are authenticated:
+
+      for ip in 111 112 113 131 132 133; do
+        ssh nexusadmin@192.168.70.$ip 'systemctl is-active nexus-vault-agent.service && sudo test -s /var/run/nexus-vault-agent/token && echo "vault-agent OK"'
+      done
+
+    Run the full chained smoke gate (39 checks across 0.E.1 + 0.E.2.1):
 
       pwsh -File scripts/swarm.ps1 smoke
 
     Iterating?
-      pwsh -File scripts/swarm.ps1 cycle    # destroy + apply + smoke
-      pwsh -File scripts/swarm.ps1 apply -Vars enable_swarm_init=false   # skip cluster bring-up
-      pwsh -File scripts/swarm.ps1 apply -Vars enable_swarm_worker_3=false  # bring up 5 of 6
+      pwsh -File scripts/swarm.ps1 cycle              # destroy + apply + smoke
+      pwsh -File scripts/swarm.ps1 apply -Vars enable_swarm_init=false               # skip cluster bring-up
+      pwsh -File scripts/swarm.ps1 apply -Vars enable_consul_gossip_encryption=false # skip 0.E.2.1
+      pwsh -File scripts/swarm.ps1 apply -Vars enable_swarm_manager_3_vault_agent=false # iterate on 5 agents
 
-    Forward direction:
-      0.E.2 = harden Consul (TLS, ACLs, gossip encryption)
-      0.E.3 = harden Nomad (ACLs, TLS, Vault token integration)
-      0.E.4 = Portainer EE clustered Swarm service
-      0.E.5 = Vault Agents on every node + PKI leaves for Docker/Consul/Nomad TLS
+    Forward direction (subsequent sub-phases):
+      0.E.2.2 = Consul TLS (per-node leaf cert from Vault PKI consul-server
+                role; tls{} block in consul.hcl; HTTP -> HTTPS hard-cut on 8501)
+      0.E.2.3 = Consul ACL system (default_policy=deny; bootstrap on leader;
+                management token persisted to Vault KV; per-agent policies +
+                tokens via Vault Agent template)
+      0.E.3   = Nomad harden (TLS, ACLs, Vault token integration)
+      0.E.4   = Portainer EE clustered Swarm service
+      0.E.5   = Vault Agent template polish + PKI leaves for Docker/Nomad
+                + close-out canon (MASTER-PLAN sub-phases, ADR, vms.yaml,
+                CHANGELOG, handbook)
   EOT
 }

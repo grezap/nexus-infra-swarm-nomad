@@ -4,7 +4,7 @@
 [![Terraform](https://img.shields.io/badge/Terraform-1.9+-purple)](https://www.terraform.io/)
 [![License](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
 [![Blueprint](https://img.shields.io/badge/blueprint-nexus--platform--plan%20v0.1.3-orange)](https://github.com/grezap/nexus-platform-plan)
-[![Phase](https://img.shields.io/badge/phase-0.E.1%20closed%20%E2%80%A2%200.E.2%20next-brightgreen)](./CHANGELOG.md)
+[![Phase](https://img.shields.io/badge/phase-0.E.2.1%20closed%20%E2%80%A2%200.E.2.2%20next-brightgreen)](./CHANGELOG.md)
 
 Tier-2 orchestration for the **NexusPlatform 66-VM lab** — a 3+3 Docker Swarm cluster with co-located Nomad servers + Consul servers on the managers and Nomad/Consul clients on the workers, plus Portainer EE deployed as a clustered Swarm service. Sits on top of the [`nexus-infra-vmware`](https://github.com/grezap/nexus-infra-vmware) foundation (Vault, AD, gateway).
 
@@ -12,7 +12,7 @@ Tier-2 orchestration for the **NexusPlatform 66-VM lab** — a 3+3 Docker Swarm 
 >
 > **New to Docker Swarm / Nomad / Consul / Portainer?** See the [tool stack glossary](https://github.com/grezap/nexus-platform-plan/blob/main/docs/glossary.md#3-container-orchestration) for plain-English definitions of each.
 >
-> **Current state (Phase 0.E.1 ✅ closed; 0.E.2 Consul harden up next):** `swarm-node` Packer template (Docker CE 29.4 + Nomad 1.9.3 + Consul 1.20.1 baked, firstboot maps NICs/hostnames from MAC, renders per-role config) · `swarm-nomad` env composing six clones (3 managers + 3 workers per [`vms.yaml`](https://github.com/grezap/nexus-platform-plan/blob/main/docs/infra/vms.yaml) lines 182–191) · `role-overlay-swarm-init.tf` brings up the cluster (init mgr-1, join mgr-2/3 + wrk-1/2/3) · 28-check smoke gate ALL GREEN. Master-plan exit gate met: `docker node ls` = 6, `nomad server members` = 3, `consul members` = 6 (3 server + 3 client, raft quorate).
+> **Current state (Phase 0.E.2.1 ✅ closed; 0.E.2.2 Consul TLS up next):** 0.E.1 swarm cluster bring-up + 0.E.2 setup (Vault PKI `consul-server` role, `nexus/swarm/consul-gossip-key` KV seed, 6 narrow Vault policies + AppRoles + JSON sidecars on the build host, `nexus-vault-agent.service` systemd unit installed on each of 6 swarm-nodes) + **0.E.2.1 Consul gossip encryption** (Vault Agent renders `/etc/consul.d/10-encrypt.hcl` from KV; rolling consul restart converged the keyring to a single primary key with `[6/6]` alive). 39-check chained smoke gate ALL GREEN.
 
 ## What's in here
 
