@@ -62,8 +62,14 @@ locals {
     if var.enable_swarm_vault_agents && spec.enabled
   }
 
-  vault_agent_creds_dir_expanded = pathexpand(var.vault_agent_swarm_creds_dir)
-  vault_pki_ca_bundle_expanded   = pathexpand(var.vault_pki_ca_bundle_path)
+  # Terraform's pathexpand() only handles `~`, NOT `$HOME`. Variable defaults
+  # are `$HOME/.nexus/...` (matches the PowerShell-side convention used by
+  # nexus-infra-vmware/security overlays), so substitute $HOME -> ~ before
+  # expansion. Result: literal Windows path like `C:/Users/grigo/.nexus/...`
+  # that terraform `filesha256()` can open + that PS Test-Path/Get-Content
+  # accept directly (no further .Replace('$HOME',...) needed).
+  vault_agent_creds_dir_expanded = pathexpand(replace(var.vault_agent_swarm_creds_dir, "$HOME", "~"))
+  vault_pki_ca_bundle_expanded   = pathexpand(replace(var.vault_pki_ca_bundle_path, "$HOME", "~"))
 }
 
 resource "null_resource" "swarm_vault_agent" {
