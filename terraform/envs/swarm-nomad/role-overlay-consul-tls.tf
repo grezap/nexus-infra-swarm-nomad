@@ -100,7 +100,7 @@ resource "null_resource" "consul_tls" {
     # PKI role config (allowed_domains, leaf TTL) pulled from security env --
     # captured here so a security-env knob bump re-issues per-node certs.
     pki_role_name = var.vault_pki_consul_role_name
-    consul_tls_v  = "5" # v5 = manual split-script invocation at end of stage1 (Vault Agent's pkiCert caches; a restart with an unchanged cert -> no destination write -> no command invocation, so v4's new split-script logic never ran on a node where v3 had already rendered the cert; manual run is idempotent + guarantees per-version outputs land). v4 = /etc/ssl/certs/consul-ca.pem operator copy. v3 = connect off + parallel restart. v2 = grpc_tls=8503. v1 = original.
+    consul_tls_v  = "6" # v6 = (a) systemd drop-in `-http-port=-1` CLI flag override (Consul HCL config-dir merge silently does NOT override the ports.http key from consul.hcl set by firstboot -- it only ADDS new keys; CLI flags trump all config layers so this is the canonical fix), (b) nftables 8501 rule via `nft -f /etc/nftables.conf` (in-place patch /etc/nftables.conf if missing, then atomic ruleset reload -- the v5 `nft add rule` appended AFTER the counter-drop rule, so the 8501 rule was unreachable). v5 = manual split-script invocation at end of stage1 (Vault Agent's pkiCert caches; a restart with an unchanged cert -> no destination write -> no command invocation, so v4's new split-script logic never ran on a node where v3 had already rendered the cert; manual run is idempotent + guarantees per-version outputs land). v4 = /etc/ssl/certs/consul-ca.pem operator copy. v3 = connect off + parallel restart. v2 = grpc_tls=8503. v1 = original.
   }
 
   depends_on = [null_resource.swarm_vault_agent, null_resource.consul_gossip_encrypt]
@@ -263,6 +263,88 @@ connect {
 # Vault Agent rather than letting Consul manage its own intermediate.
 '@
 
+      # /usr/local/sbin/consul-systemd-http-override.sh -- v6 fix.
+      # Consul's HCL config-dir merge silently DOES NOT override the
+      # ports.http key set by firstboot's consul.hcl; it only ADDS new
+      # keys (https, grpc_tls). So 20-tls.hcl's `ports.http = -1` is
+      # ignored at runtime, /v1/agent/self DebugConfig still shows
+      # HTTPPort=8500, and HTTP/8500 keeps listening (breaking the
+      # hard-cut). CLI flags are highest precedence in Consul's config
+      # layering, so we install a systemd drop-in that resets ExecStart
+      # and re-sets it with `-http-port=-1` appended. Pulls the original
+      # ExecStart from `systemctl cat` so we don't have to assume the
+      # binary path (apt's /usr/bin/consul vs manual /usr/local/bin/).
+      # Idempotent: bails if the drop-in is already in place.
+      $systemdDropinScript = @'
+#!/bin/bash
+set -euo pipefail
+if systemctl cat consul.service 2>/dev/null | grep -q 'http-port=-1'; then
+  echo "[consul-http-override] drop-in already in place; nothing to do"
+  exit 0
+fi
+EXEC_LINE=$(systemctl cat consul.service | grep -E '^ExecStart=' | head -1 | sed 's/^ExecStart=//')
+if [ -z "$EXEC_LINE" ]; then
+  echo "[consul-http-override] ERROR: could not read ExecStart from consul.service" >&2
+  exit 1
+fi
+mkdir -p /etc/systemd/system/consul.service.d
+cat > /etc/systemd/system/consul.service.d/tls-ports-override.conf <<EOF
+# 0.E.2.2 v6 -- override ports.http via CLI flag (HCL merge ignores the key)
+[Service]
+ExecStart=
+ExecStart=$EXEC_LINE -http-port=-1
+EOF
+chmod 0644 /etc/systemd/system/consul.service.d/tls-ports-override.conf
+systemctl daemon-reload
+echo "[consul-http-override] drop-in installed; ExecStart=$EXEC_LINE -http-port=-1"
+'@
+
+      # /usr/local/sbin/consul-nft-fix.sh -- v6 fix.
+      # nftables rules are evaluated top-to-bottom in the input chain;
+      # once a packet matches the `counter ... drop` rule, processing
+      # stops. v5 used `nft add rule` which APPENDS at the end of the
+      # chain -- so the 8501 rule landed AFTER the drop and was inert.
+      # Fix: patch /etc/nftables.conf in place to include 8501 in the
+      # existing operator-UI dport set (handles three legacy forms from
+      # earlier Packer templates), then `nft -f /etc/nftables.conf` for
+      # an atomic kernel ruleset replacement. Bonus: also persistent
+      # across reboots (the v5 runtime add was lost on restart).
+      $nftFixScript = @'
+#!/bin/bash
+set -euo pipefail
+CONF=/etc/nftables.conf
+if grep -qE 'dport \{[^}]*8501[^}]*\}.*accept' "$CONF"; then
+  echo "[nft-fix] 8501 already in $CONF; will reload anyway for position fix"
+else
+  # Three legacy forms shipped by older Packer templates:
+  #   tcp dport { 8500, 4646 }
+  #   tcp dport { 8500 }
+  #   tcp dport 8500 accept   (bare port)
+  sed -i -E 's/dport \{ 8500, 4646 \}/dport { 8500, 8501, 4646 }/' "$CONF"
+  sed -i -E 's/dport \{ 8500 \}/dport { 8500, 8501 }/' "$CONF"
+  sed -i -E 's/(tcp dport) 8500 accept/\1 { 8500, 8501 } accept/' "$CONF"
+fi
+
+# Atomic in-kernel ruleset replacement
+nft -f "$CONF"
+
+# Sanity probe: 8501 rule must come BEFORE counter-drop in the active chain
+H_8501=$(nft -a list chain inet filter input | awk '/dport.*8501.*accept/ {for (i=1;i<=NF;i++) if ($i=="handle") {print $(i+1); exit}}')
+H_DROP=$(nft -a list chain inet filter input | awk '/counter packets.*drop/ {for (i=1;i<=NF;i++) if ($i=="handle") {print $(i+1); exit}}')
+
+if [ -z "$H_8501" ]; then
+  echo "[nft-fix] ERROR: 8501 rule not found in active chain after reload" >&2
+  nft list chain inet filter input >&2
+  exit 1
+fi
+if [ -n "$H_DROP" ] && [ "$H_8501" -ge "$H_DROP" ]; then
+  echo "[nft-fix] ERROR: 8501 rule (handle $H_8501) is at/after drop (handle $H_DROP); fix did not work" >&2
+  nft -a list chain inet filter input >&2
+  exit 1
+fi
+echo "[nft-fix] OK: 8501 active before drop (8501=handle $H_8501, drop=handle $${H_DROP:-none})"
+'@
+
       # /etc/profile.d/consul-tls.sh -- env var defaults for interactive
       # SSH login shells (NOT non-interactive `ssh user@host cmd`; smoke
       # probes set these inline). Makes operator workflows ergonomic.
@@ -318,8 +400,11 @@ EOT
 }
 "@
 
-        $splitB64 = [Convert]::ToBase64String([System.Text.UTF8Encoding]::new($false).GetBytes($splitScript))
-        $vaB64    = [Convert]::ToBase64String([System.Text.UTF8Encoding]::new($false).GetBytes($vaultAgentTemplate))
+        # LF-normalize before encoding (Windows CRLF source -> bash parse errors)
+        $splitLf  = $splitScript        -replace "`r`n", "`n"
+        $vaLf     = $vaultAgentTemplate -replace "`r`n", "`n"
+        $splitB64 = [Convert]::ToBase64String([System.Text.UTF8Encoding]::new($false).GetBytes($splitLf))
+        $vaB64    = [Convert]::ToBase64String([System.Text.UTF8Encoding]::new($false).GetBytes($vaLf))
 
         $stage1 = @"
 set -euo pipefail
@@ -389,10 +474,30 @@ sudo /usr/local/sbin/consul-tls-split.sh
       # running on plain HTTP -- the new config file isn't loaded until
       # Phase 3 restart. This split lets us minimize the cluster outage
       # window in Phase 3.
-      $tlsConfigB64  = [Convert]::ToBase64String([System.Text.UTF8Encoding]::new($false).GetBytes($tlsConfig))
-      $envProfileB64 = [Convert]::ToBase64String([System.Text.UTF8Encoding]::new($false).GetBytes($envProfile))
+      # Normalize all PS-heredoc payloads to LF-only before base64. Source
+      # files on the build host are CRLF (Windows), and PS @'..'@ preserves
+      # source line endings -- which leaks into the decoded script on the
+      # remote and breaks bash parsing in subtle ways (e.g. `sudo bash\r`
+      # decoded as a command name with trailing CR -> "command not found").
+      $tlsConfigLf       = $tlsConfig           -replace "`r`n", "`n"
+      $envProfileLf      = $envProfile          -replace "`r`n", "`n"
+      $systemdDropinLf   = $systemdDropinScript -replace "`r`n", "`n"
+      $nftFixLf          = $nftFixScript        -replace "`r`n", "`n"
 
-      $stage2 = @"
+      $tlsConfigB64     = [Convert]::ToBase64String([System.Text.UTF8Encoding]::new($false).GetBytes($tlsConfigLf))
+      $envProfileB64    = [Convert]::ToBase64String([System.Text.UTF8Encoding]::new($false).GetBytes($envProfileLf))
+      $systemdDropinB64 = [Convert]::ToBase64String([System.Text.UTF8Encoding]::new($false).GetBytes($systemdDropinLf))
+      $nftFixB64        = [Convert]::ToBase64String([System.Text.UTF8Encoding]::new($false).GetBytes($nftFixLf))
+
+      # Stage2 grew in v6 (4 nested base64 blobs vs v5's 2), and the previous
+      # `echo 'B64' | base64 -d | bash` outer-command pattern started failing
+      # under -Parallel runspaces with "bash: -c: line 1: unexpected EOF while
+      # looking for matching '". Cause: ssh.exe arg/quoting handling on Windows
+      # is fragile when forwarding ~6KB single-quoted strings via -Parallel.
+      # Fix: pipe the plaintext bash script to ssh via stdin + run with
+      # `bash -s`. No long argv, no embedded quoting, no command-length cliff.
+      # Line endings normalized to LF so the remote bash doesn't choke on CRLF.
+      $stage2 = (@"
 set -euo pipefail
 echo '$tlsConfigB64' | base64 -d | sudo tee /etc/consul.d/20-tls.hcl > /dev/null
 sudo chown root:consul /etc/consul.d/20-tls.hcl
@@ -402,19 +507,29 @@ echo '$envProfileB64' | base64 -d | sudo tee /etc/profile.d/consul-tls.sh > /dev
 sudo chown root:root /etc/profile.d/consul-tls.sh
 sudo chmod 0644 /etc/profile.d/consul-tls.sh
 
-if ! sudo nft list chain inet filter input 2>/dev/null | grep -q 'tcp dport.*8501'; then
-  sudo nft add rule inet filter input iifname \"nic0\" ip saddr 192.168.70.0/24 tcp dport 8501 accept comment '"Consul HTTPS UI from VMnet11 (0.E.2.2)"'
-fi
-"@
-      $stage2B64 = [Convert]::ToBase64String([System.Text.UTF8Encoding]::new($false).GetBytes($stage2))
+# v6: install systemd drop-in to override ports.http via CLI flag.
+# Must land BEFORE Phase 3 restart so the new ExecStart is used.
+# Absolute /bin/bash since sudo's secure_path may not include `bash`.
+echo '$systemdDropinB64' | base64 -d | sudo /bin/bash
+
+# v6: fix nftables rule position. Reloads /etc/nftables.conf atomically;
+# if 8501 missing from baseline (older Packer template), patches first.
+echo '$nftFixB64' | base64 -d | sudo /bin/bash
+"@) -replace "`r`n", "`n"
 
       # Parallel SSH fan-out via ForEach-Object -Parallel (PS7+).
       $phase2Errors = $nodes | ForEach-Object -ThrottleLimit 6 -Parallel {
         $node = $_
         $sshUser = $using:sshUser
         $sshOpts = $using:sshOpts
-        $stage2B64 = $using:stage2B64
-        $out = ssh @sshOpts "$sshUser@$($node.VmIp)" "echo '$stage2B64' | base64 -d | bash" 2>&1 | Out-String
+        $stage2 = $using:stage2
+        # Pipe the plaintext script to ssh's stdin; remote bash reads via -s.
+        # `tr -d '\r'` strips any CR bytes that pwsh's Windows-side stdout
+        # writer injects when piping to ssh.exe (we LF-normalize $stage2 in
+        # memory but the pipe-to-ssh.exe path can still re-introduce CRs in
+        # text mode -- bash then sees `sudo /bin/bash\r` as the command and
+        # errors with "command not found").
+        $out = $stage2 | ssh @sshOpts "$sshUser@$($node.VmIp)" "tr -d '\r' | bash -s" 2>&1 | Out-String
         if ($LASTEXITCODE -ne 0) {
           return "[$($node.Host)] phase2 failed (rc=$LASTEXITCODE): $($out.Trim())"
         }
@@ -516,8 +631,8 @@ fi
       $sshOpts = @('-o','ConnectTimeout=5','-o','BatchMode=yes','-o','StrictHostKeyChecking=no')
       $ips = @('192.168.70.111','192.168.70.112','192.168.70.113','192.168.70.131','192.168.70.132','192.168.70.133')
       foreach ($ip in $ips) {
-        Write-Host "[consul-tls destroy] $${ip}: removing TLS config + cert files + restart consul"
-        ssh @sshOpts "$sshUser@$ip" "sudo rm -f /etc/consul.d/20-tls.hcl /etc/profile.d/consul-tls.sh /etc/vault-agent/20-template-tls.hcl /etc/consul.d/tls/server.crt /etc/consul.d/tls/server.key /etc/consul.d/tls/ca.pem /etc/consul.d/tls/bundle.pem /etc/ssl/certs/consul-ca.pem; sudo systemctl restart nexus-vault-agent.service consul.service" 2>$null
+        Write-Host "[consul-tls destroy] $${ip}: removing TLS config + cert files + systemd drop-in + restart consul"
+        ssh @sshOpts "$sshUser@$ip" "sudo rm -f /etc/consul.d/20-tls.hcl /etc/profile.d/consul-tls.sh /etc/vault-agent/20-template-tls.hcl /etc/consul.d/tls/server.crt /etc/consul.d/tls/server.key /etc/consul.d/tls/ca.pem /etc/consul.d/tls/bundle.pem /etc/ssl/certs/consul-ca.pem /etc/systemd/system/consul.service.d/tls-ports-override.conf; sudo systemctl daemon-reload; sudo systemctl restart nexus-vault-agent.service consul.service" 2>$null
       }
       exit 0
     PWSH

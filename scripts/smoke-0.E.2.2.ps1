@@ -138,28 +138,133 @@ foreach ($ip in $allIps) {
 }
 
 # ─── Section: HTTPS:8501 reachable from build host with vault CA bundle ──
+# Windows ships curl.exe linked against Schannel, which can't validate a
+# chain rooted in our Vault PKI from a PEM CAfile (it returns
+# CERT_TRUST_IS_PARTIAL_CHAIN). Per memory/feedback_smoke_gate_probe_
+# robustness.md, do the chain build in PowerShell using X509Chain with
+# ExtraStore preloaded with the intermediate(s) from the bundle.
 Write-Section 'HTTPS:8501 reachable from build host with $HOME/.nexus/vault-ca-bundle.crt'
 if (-not (Test-Path $caBundle)) {
     Write-Host "[FAIL] $caBundle missing -- run nexus-infra-vmware/scripts/security.ps1 apply (PKI distribute)" -ForegroundColor Red
     $script:failures += "vault CA bundle missing on build host"
 } else {
-    foreach ($ip in $allIps) {
-        Test-Check -Description "$ip : curl https://${ip}:8501/v1/status/leader returns 200 with vault CA bundle" -Probe {
-            $code = (curl -sS --cacert $caBundle -o $null -w '%{http_code}' --connect-timeout 5 "https://${ip}:8501/v1/status/leader" 2>&1 | Out-String).Trim()
-            $code -eq '200'
+    # Parse all certs from the PEM bundle into an X509Certificate2Collection.
+    # The vault-ca-bundle.crt nexus-infra-vmware writes contains only the
+    # root CA; consul leaves are issued by the intermediate (pki_int), and
+    # consul.service does NOT send the intermediate during the handshake
+    # (only the leaf). So fetch the intermediate from one of the nodes
+    # over SSH and add it to ExtraStore -- now the chain can complete:
+    # leaf -> intermediate (ExtraStore) -> root (bundle).
+    $bundlePem = Get-Content -Raw $caBundle
+    $bundleCerts = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2Collection
+    $bundleCerts.ImportFromPem($bundlePem)
+
+    $intermediatePem = (ssh @sshOpts "$user@$($managerIps[0])" 'sudo cat /etc/consul.d/tls/ca.pem' 2>$null | Out-String)
+    if ($intermediatePem -match 'BEGIN CERTIFICATE') {
+        $bundleCerts.ImportFromPem($intermediatePem)
+    }
+    # Make the cert collection visible inside the SslStream validator (which
+    # is invoked from a different scope -- $using: only works inside Parallel
+    # runspaces, so use $script: instead).
+    $script:trustStore = $bundleCerts
+
+    # Only managers expose HTTPS:8501 to operator clients. Workers ship with
+    # `client_addr = 127.0.0.1` in consul.hcl (canonical -- operators don't
+    # talk to workers directly; they go through manager-side raft proxying),
+    # so worker port 8501 binds to localhost only and isn't reachable from
+    # the build host. The HTTPS check therefore targets $managerIps; the
+    # workers' TLS health is exercised via cluster shape probes below
+    # (consul members + raft list-peers over HTTPS+mTLS, which sees workers
+    # joined and the leader replicating to them).
+    foreach ($ip in $managerIps) {
+        Test-Check -Description "$ip : HTTPS:8501 returns 200 + cert chain validates against vault CA bundle" -Probe {
+            $tcp = $null
+            $stream = $null
+            $ssl = $null
+            try {
+                $tcp = [System.Net.Sockets.TcpClient]::new()
+                $iar = $tcp.BeginConnect($ip, 8501, $null, $null)
+                if (-not $iar.AsyncWaitHandle.WaitOne(5000)) { return $false }
+                $tcp.EndConnect($iar)
+                $stream = $tcp.GetStream()
+
+                # Custom validation: feed leaf + presented chain into X509Chain
+                # with our bundle (root + intermediate) in ExtraStore.
+                # AllowUnknownCertificateAuthority so the Vault PKI root that
+                # isn't in Windows trust store doesn't cause Build() to return
+                # false; we then do our own root-anchor check against the
+                # bundle.
+                $validator = {
+                    param($sender, $cert, $chain, $errors)
+                    $serverCert = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($cert)
+                    $myChain = [System.Security.Cryptography.X509Certificates.X509Chain]::new()
+                    $myChain.ChainPolicy.ExtraStore.AddRange($script:trustStore)
+                    $myChain.ChainPolicy.RevocationMode = 'NoCheck'
+                    $myChain.ChainPolicy.VerificationFlags = 'AllowUnknownCertificateAuthority'
+                    [void]$myChain.Build($serverCert)
+                    # The chain's last element must be our bundle's root.
+                    if ($myChain.ChainElements.Count -lt 2) { return $false }
+                    $rootThumb = $myChain.ChainElements[$myChain.ChainElements.Count - 1].Certificate.Thumbprint
+                    foreach ($c in $script:trustStore) {
+                        if ($c.Thumbprint -eq $rootThumb) { return $true }
+                    }
+                    return $false
+                }
+                $ssl = [System.Net.Security.SslStream]::new($stream, $false, $validator)
+                $ssl.AuthenticateAsClient($ip)
+
+                # Request /v1/status/leader
+                $req = "GET /v1/status/leader HTTP/1.1`r`nHost: ${ip}:8501`r`nConnection: close`r`n`r`n"
+                $reqBytes = [System.Text.Encoding]::ASCII.GetBytes($req)
+                $ssl.Write($reqBytes, 0, $reqBytes.Length)
+                $ssl.Flush()
+
+                $reader = [System.IO.StreamReader]::new($ssl)
+                $statusLine = $reader.ReadLine()
+                return ($statusLine -match '^HTTP/1\.[01] 200')
+            } catch {
+                return $false
+            } finally {
+                if ($ssl) { $ssl.Dispose() }
+                if ($stream) { $stream.Dispose() }
+                if ($tcp) { $tcp.Dispose() }
+            }
         } | Out-Null
     }
 }
 
 # ─── Section: HTTP:8500 NOT listening ─────────────────────────────────────
+# Use TcpClient.BeginConnect rather than curl: curl on Schannel emits its
+# error to stderr which `2>&1 | Out-String` merges into the captured `code`,
+# breaking strict `-eq '000'` matching. A direct TCP connect attempt is
+# both faster and gives a clean boolean: connect refused/timeout = port
+# not serving.
 Write-Section 'HTTP:8500 hard-cut (port not listening)'
 foreach ($ip in $allIps) {
-    Test-Check -Description "$ip : tcp/8500 closed (connection refused or timeout)" -Probe {
-        # `curl` returns non-200 if no listener. Check for connection failure.
-        $code = (curl -sS -o $null -w '%{http_code}' --connect-timeout 3 "http://${ip}:8500/v1/status/leader" 2>&1 | Out-String).Trim()
-        # Empty code = couldn't connect (refused/timeout). Or non-zero curl exit.
-        # Either way, 8500 isn't serving Consul.
-        return ($code -eq '000' -or $code -eq '')
+    Test-Check -Description "$ip : tcp/8500 not listening (connection refused or timeout within 3s)" -Probe {
+        $tcp = $null
+        try {
+            $tcp = [System.Net.Sockets.TcpClient]::new()
+            $iar = $tcp.BeginConnect($ip, 8500, $null, $null)
+            if ($iar.AsyncWaitHandle.WaitOne(3000)) {
+                # Wait completed within 3s -- check whether connect actually succeeded
+                try {
+                    $tcp.EndConnect($iar)
+                    # Connected successfully -- 8500 is OPEN, which is the FAILURE case
+                    return $false
+                } catch {
+                    # Connect threw (refused/reset/host-unreachable) -- success path
+                    return $true
+                }
+            } else {
+                # Timed out within window -- port not serving (or filtered)
+                return $true
+            }
+        } catch {
+            return $true
+        } finally {
+            if ($tcp) { $tcp.Dispose() }
+        }
     } | Out-Null
 }
 

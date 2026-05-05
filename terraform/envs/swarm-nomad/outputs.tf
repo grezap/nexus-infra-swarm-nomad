@@ -33,39 +33,52 @@ output "swarm_node_vm_paths" {
 output "next_step" {
   description = "Operator crib -- what to do once apply is green."
   value       = <<-EOT
-    Phase 0.E.2.1 closed (if smoke gate is green): swarm cluster live (0.E.1)
-    + Vault Agents + Consul gossip encryption.
+    Phase 0.E.2.2 closed (if smoke gate is green): mutual TLS for Consul
+    internal RPC + Raft, server-only TLS for HTTPS API on port 8501,
+    HTTP/8500 hard-cut. Per-node leaf certs from Vault PKI consul-server
+    role (90-day TTL); rendered + auto-rotated by per-host Vault Agents.
 
-    Verify the master-plan exit gate (MASTER-PLAN.md line 151):
+    Verify HTTPS:8501 reachable from the build host with the Vault PKI bundle:
 
-      ssh nexusadmin@192.168.70.111 'docker node ls'         # 6 nodes
-      ssh nexusadmin@192.168.70.111 'consul members'         # 6 members
-      ssh nexusadmin@192.168.70.111 'nomad server members'   # 3 servers
+      $env:CONSUL_HTTP_ADDR="https://192.168.70.111:8501"
+      curl --cacert "$env:USERPROFILE\.nexus\vault-ca-bundle.crt" `
+           https://192.168.70.111:8501/v1/status/leader
+      # ^ note: Windows curl is Schannel; if you hit CERT_TRUST_IS_PARTIAL_CHAIN
+      #   use the smoke gate's PowerShell X509Chain probe instead, or run from
+      #   any swarm-node with `consul members` (env vars in /etc/profile.d).
 
-    Verify 0.E.2.1 gossip-encrypt is uniform across the cluster:
-
-      ssh nexusadmin@192.168.70.111 'consul keyring -list'
-      # Expect: single base64 key with [6/6] in the LAN section.
-
-    Verify per-node Vault Agents are authenticated:
+    Verify HTTP/8500 hard-cut on every node (no listener):
 
       for ip in 111 112 113 131 132 133; do
-        ssh nexusadmin@192.168.70.$ip 'systemctl is-active nexus-vault-agent.service && sudo test -s /var/run/nexus-vault-agent/token && echo "vault-agent OK"'
+        nc -vz 192.168.70.$ip 8500 2>&1 | grep -E "refused|timed out"
       done
 
-    Run the full chained smoke gate (39 checks across 0.E.1 + 0.E.2.1):
+    Verify cluster health over mutual TLS (from any swarm-node, env vars
+    auto-loaded by /etc/profile.d/consul-tls.sh in interactive shells):
+
+      ssh nexusadmin@192.168.70.111
+      consul members                           # 6 alive
+      consul operator raft list-peers          # 3 server peers, 1 leader
+      consul keyring -list                     # 1 LAN key, [6/6]
+
+    Verify per-node Vault Agents are still rendering certs:
+
+      for ip in 111 112 113 131 132 133; do
+        ssh nexusadmin@192.168.70.$ip 'sudo test -s /etc/consul.d/tls/server.crt && \
+          sudo openssl x509 -in /etc/consul.d/tls/server.crt -noout -enddate'
+      done
+
+    Run the full chained smoke gate (~70 checks across 0.E.1 + 0.E.2.1 + 0.E.2.2):
 
       pwsh -File scripts/swarm.ps1 smoke
 
     Iterating?
       pwsh -File scripts/swarm.ps1 cycle              # destroy + apply + smoke
-      pwsh -File scripts/swarm.ps1 apply -Vars enable_swarm_init=false               # skip cluster bring-up
-      pwsh -File scripts/swarm.ps1 apply -Vars enable_consul_gossip_encryption=false # skip 0.E.2.1
-      pwsh -File scripts/swarm.ps1 apply -Vars enable_swarm_manager_3_vault_agent=false # iterate on 5 agents
+      pwsh -File scripts/swarm.ps1 apply -Vars enable_consul_tls=false                # keep cluster on plain HTTP/8500 (lab-only)
+      pwsh -File scripts/swarm.ps1 apply -Vars enable_consul_gossip_encryption=false  # skip 0.E.2.1
+      pwsh -File scripts/swarm.ps1 apply -Vars enable_swarm_init=false                # skip cluster bring-up
 
     Forward direction (subsequent sub-phases):
-      0.E.2.2 = Consul TLS (per-node leaf cert from Vault PKI consul-server
-                role; tls{} block in consul.hcl; HTTP -> HTTPS hard-cut on 8501)
       0.E.2.3 = Consul ACL system (default_policy=deny; bootstrap on leader;
                 management token persisted to Vault KV; per-agent policies +
                 tokens via Vault Agent template)

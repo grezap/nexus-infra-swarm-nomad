@@ -152,9 +152,15 @@ Test-Check -Description "$leaderIp : docker node ls reports 3 workers (Ready)" -
 } | Out-Null
 
 # ─── Section 5: Consul cluster shape ─────────────────────────────────────
+# Probes target the TLS endpoint (steady state post-0.E.2.2: HTTP/8500 is
+# hard-cut, only HTTPS/8501 listens). If you're running 0.E.1 in isolation
+# with `enable_consul_tls=false`, override $consulEnv to "" before invoking
+# the smoke script, or run `consul members` directly via ssh.
+$consulEnv = "CONSUL_HTTP_ADDR=https://localhost:8501 CONSUL_CACERT=/etc/ssl/certs/consul-ca.pem"
+
 Write-Section 'Consul cluster shape (informational; harden in 0.E.2)'
 Test-Check -Description "$leaderIp : consul members reports 6 alive members" -Probe {
-    $out = Invoke-RemoteCommand -Ip $leaderIp -Command "consul members 2>&1 | grep -c alive || true"
+    $out = Invoke-RemoteCommand -Ip $leaderIp -Command "$consulEnv consul members 2>&1 | grep -c alive || true"
     $out -match '^6$'
 } | Out-Null
 
@@ -162,7 +168,7 @@ Test-Check -Description "$leaderIp : consul operator raft list-peers reports 3 p
     # Count rows with the canonical VMnet10 backplane IP prefix; the column
     # header reads "Voter" (capital) and rows show "true", so plain
     # `grep -c voter` is a probe bug -- counts neither header nor rows.
-    $out = Invoke-RemoteCommand -Ip $leaderIp -Command "consul operator raft list-peers | grep -c '192.168.10' || true"
+    $out = Invoke-RemoteCommand -Ip $leaderIp -Command "$consulEnv consul operator raft list-peers | grep -c '192.168.10' || true"
     $out -match '^3$'
 } | Out-Null
 
