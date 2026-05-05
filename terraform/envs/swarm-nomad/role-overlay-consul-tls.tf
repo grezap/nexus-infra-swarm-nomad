@@ -100,7 +100,7 @@ resource "null_resource" "consul_tls" {
     # PKI role config (allowed_domains, leaf TTL) pulled from security env --
     # captured here so a security-env knob bump re-issues per-node certs.
     pki_role_name = var.vault_pki_consul_role_name
-    consul_tls_v  = "3" # v3 = (a) connect{enabled=false} override (Connect's auto-bootstrapped CA + per-server cert with SAN server.<dc>.peering.<trust-domain>.consul caused verify_server_hostname mismatches during sequential rolling), (b) parallel "big-bang" restart in phase 3 (sequential rolling RPC fails both directions: verify_outgoing rejects plaintext peers + verify_incoming rejects plaintext callers; ~10-30s cluster outage in exchange for clean convergence), (c) ports.grpc_tls=-1 since Connect is off. v2 = grpc_tls=8503 fix. v1 = original.
+    consul_tls_v  = "4" # v4 = world-readable CA bundle copy at /etc/ssl/certs/consul-ca.pem (operator/CLI access; /etc/consul.d/ is 0750 root:consul, non-consul users can't traverse to reach the original ca.pem). v3 = connect off + parallel restart. v2 = grpc_tls=8503. v1 = original.
   }
 
   depends_on = [null_resource.swarm_vault_agent, null_resource.consul_gossip_encrypt]
@@ -179,7 +179,15 @@ install -m 0644 -o root -g consul "$SERVER_CRT" "$DEST/server.crt"
 install -m 0640 -o root -g consul "$SERVER_KEY" "$DEST/server.key"
 install -m 0644 -o root -g consul "$CA_PEM"     "$DEST/ca.pem"
 
-echo "[consul-tls-split] $(date -u +%FT%TZ) bundle split: server.crt + server.key + ca.pem"
+# Operator-accessible copy of the CA bundle. /etc/consul.d/ is mode
+# 0750 root:consul (set by firstboot's Ansible) -- protects 10-encrypt.hcl
+# (gossip key) + future 30-acl.hcl from non-consul users. nexusadmin can't
+# traverse it, so consul CLI calls AS nexusadmin can't read the CA.
+# Fix: also write a world-readable copy to /etc/ssl/certs/. Operator env
+# (/etc/profile.d/consul-tls.sh) + smoke probes use this path.
+install -m 0644 -o root -g root "$CA_PEM" /etc/ssl/certs/consul-ca.pem
+
+echo "[consul-tls-split] $(date -u +%FT%TZ) bundle split: server.crt + server.key + ca.pem (+ /etc/ssl/certs/consul-ca.pem for operator)"
 
 # Reload consul iff it's already running with TLS configured (cert rotation
 # case). On first-time TLS enable, consul.service hasn't been restarted yet
@@ -260,8 +268,13 @@ connect {
       # probes set these inline). Makes operator workflows ergonomic.
       $envProfile = @'
 # Consul TLS endpoint defaults for operator login shells.
+# Note: CONSUL_CACERT points at /etc/ssl/certs/consul-ca.pem (world-readable
+# copy of /etc/consul.d/tls/ca.pem), since /etc/consul.d/ is 0750 root:consul
+# and non-consul users can't traverse there. The split script writes both
+# locations; consul.service uses /etc/consul.d/tls/ca.pem (private), CLIs
+# use /etc/ssl/certs/consul-ca.pem (public).
 export CONSUL_HTTP_ADDR=https://127.0.0.1:8501
-export CONSUL_CACERT=/etc/consul.d/tls/ca.pem
+export CONSUL_CACERT=/etc/ssl/certs/consul-ca.pem
 '@
 
       # ─── Phase 1 (sequential per node, doesn't restart consul): ────────
@@ -432,7 +445,7 @@ fi
         while ((Get-Date) -lt $deadline) {
           $status = (ssh @sshOpts "$sshUser@$($node.VmIp)" "systemctl is-active consul.service" 2>&1 | Out-String).Trim()
           if ($status -eq 'active') {
-            $probe = (ssh @sshOpts "$sshUser@$($node.VmIp)" "curl -sS --cacert /etc/consul.d/tls/ca.pem -o /dev/null -w '%%{http_code}' https://127.0.0.1:8501/v1/status/leader 2>&1" 2>&1 | Out-String).Trim()
+            $probe = (ssh @sshOpts "$sshUser@$($node.VmIp)" "curl -sS --cacert /etc/ssl/certs/consul-ca.pem -o /dev/null -w '%%{http_code}' https://127.0.0.1:8501/v1/status/leader 2>&1" 2>&1 | Out-String).Trim()
             if ($probe -match '^200$') { return $null }
           }
           Start-Sleep -Seconds 3
@@ -454,7 +467,7 @@ fi
       # Cluster-wide verification from leader's perspective. Use env vars
       # inline since /etc/profile.d/ doesn't load in non-interactive ssh.
       $leaderIp = '192.168.70.111'
-      $envPrefix = "CONSUL_HTTP_ADDR=https://localhost:8501 CONSUL_CACERT=/etc/consul.d/tls/ca.pem"
+      $envPrefix = "CONSUL_HTTP_ADDR=https://localhost:8501 CONSUL_CACERT=/etc/ssl/certs/consul-ca.pem"
 
       $members = (ssh @sshOpts "$sshUser@$leaderIp" "$envPrefix consul members 2>&1 | grep -c alive" 2>&1 | Out-String).Trim()
       if ($members -ne '6') {
@@ -485,7 +498,7 @@ fi
       $ips = @('192.168.70.111','192.168.70.112','192.168.70.113','192.168.70.131','192.168.70.132','192.168.70.133')
       foreach ($ip in $ips) {
         Write-Host "[consul-tls destroy] $${ip}: removing TLS config + cert files + restart consul"
-        ssh @sshOpts "$sshUser@$ip" "sudo rm -f /etc/consul.d/20-tls.hcl /etc/profile.d/consul-tls.sh /etc/vault-agent/20-template-tls.hcl /etc/consul.d/tls/server.crt /etc/consul.d/tls/server.key /etc/consul.d/tls/ca.pem /etc/consul.d/tls/bundle.pem; sudo systemctl restart nexus-vault-agent.service consul.service" 2>$null
+        ssh @sshOpts "$sshUser@$ip" "sudo rm -f /etc/consul.d/20-tls.hcl /etc/profile.d/consul-tls.sh /etc/vault-agent/20-template-tls.hcl /etc/consul.d/tls/server.crt /etc/consul.d/tls/server.key /etc/consul.d/tls/ca.pem /etc/consul.d/tls/bundle.pem /etc/ssl/certs/consul-ca.pem; sudo systemctl restart nexus-vault-agent.service consul.service" 2>$null
       }
       exit 0
     PWSH

@@ -62,7 +62,7 @@ $nodeSpecs = @{
 $caBundle = Join-Path $env:USERPROFILE '.nexus/vault-ca-bundle.crt'
 
 $sshOpts = @('-o', 'ConnectTimeout=5', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=no')
-$envPrefix = "CONSUL_HTTP_ADDR=https://localhost:8501 CONSUL_CACERT=/etc/consul.d/tls/ca.pem"
+$envPrefix = "CONSUL_HTTP_ADDR=https://localhost:8501 CONSUL_CACERT=/etc/ssl/certs/consul-ca.pem"
 
 $failures = @()
 
@@ -100,6 +100,11 @@ Write-Section 'Per-node TLS cert files (server.crt + server.key + ca.pem)'
 foreach ($ip in $allIps) {
     Test-Check -Description "$ip : /etc/consul.d/tls/server.crt + key + ca.pem all present + non-empty" -Probe {
         $out = Invoke-RemoteCommand -Ip $ip -Command 'sudo test -s /etc/consul.d/tls/server.crt && sudo test -s /etc/consul.d/tls/server.key && sudo test -s /etc/consul.d/tls/ca.pem && echo OK'
+        $out -match '^OK$'
+    } | Out-Null
+
+    Test-Check -Description "$ip : /etc/ssl/certs/consul-ca.pem present (operator-readable CA copy)" -Probe {
+        $out = Invoke-RemoteCommand -Ip $ip -Command 'test -r /etc/ssl/certs/consul-ca.pem && echo OK'
         $out -match '^OK$'
     } | Out-Null
 }
