@@ -153,14 +153,37 @@ Test-Check -Description "$leaderIp : docker node ls reports 3 workers (Ready)" -
 
 # ─── Section 5: Consul cluster shape ─────────────────────────────────────
 # Probes target the TLS endpoint (steady state post-0.E.2.2: HTTP/8500 is
-# hard-cut, only HTTPS/8501 listens). If you're running 0.E.1 in isolation
-# with `enable_consul_tls=false`, override $consulEnv to "" before invoking
-# the smoke script, or run `consul members` directly via ssh.
+# hard-cut, only HTTPS/8501 listens). After 0.E.2.3, ACL is enforced with
+# default_policy=deny so the Consul probes need a token to see anything.
+# Resolve the management token from Vault KV (post-0.E.2.3); fall back to
+# tokenless calls (pre-0.E.2.3 baseline behavior).
 $consulEnv = "CONSUL_HTTP_ADDR=https://localhost:8501 CONSUL_CACERT=/etc/ssl/certs/consul-ca.pem"
+$consulMgmtToken = ''
+$keysFileE1 = Join-Path $env:USERPROFILE '.nexus/vault-init.json'
+if (Test-Path $keysFileE1) {
+    try {
+        $rootTokenE1 = (Get-Content $keysFileE1 | ConvertFrom-Json).root_token
+        if ($rootTokenE1) {
+            # Probe Vault KV for mgmt token; if path is missing or empty,
+            # we're pre-0.E.2.3 and the probes run tokenless (legacy).
+            $kvProbe = @"
+set -euo pipefail
+export VAULT_TOKEN='$rootTokenE1'
+VAULT_ADDR=https://127.0.0.1:8200 VAULT_SKIP_VERIFY=true vault kv get -field=management_token -mount=nexus swarm/consul-bootstrap-token 2>/dev/null || true
+"@
+            $kvProbeB64 = [Convert]::ToBase64String([System.Text.UTF8Encoding]::new($false).GetBytes(($kvProbe -replace "`r`n", "`n")))
+            $kvOut = (ssh @sshOpts "$user@192.168.70.121" "echo '$kvProbeB64' | base64 -d | bash" 2>&1 | Out-String).Trim()
+            if ($kvOut -and $kvOut.Length -ge 36) { $consulMgmtToken = $kvOut }
+        }
+    } catch {
+        # Pre-ACL state or Vault unreachable; consul probes run tokenless
+    }
+}
+$consulTokenEnv = if ($consulMgmtToken) { "CONSUL_HTTP_TOKEN='$consulMgmtToken'" } else { '' }
 
 Write-Section 'Consul cluster shape (informational; harden in 0.E.2)'
 Test-Check -Description "$leaderIp : consul members reports 6 alive members" -Probe {
-    $out = Invoke-RemoteCommand -Ip $leaderIp -Command "$consulEnv consul members 2>&1 | grep -c alive || true"
+    $out = Invoke-RemoteCommand -Ip $leaderIp -Command "$consulEnv $consulTokenEnv consul members 2>&1 | grep -c alive || true"
     $out -match '^6$'
 } | Out-Null
 
@@ -168,7 +191,7 @@ Test-Check -Description "$leaderIp : consul operator raft list-peers reports 3 p
     # Count rows with the canonical VMnet10 backplane IP prefix; the column
     # header reads "Voter" (capital) and rows show "true", so plain
     # `grep -c voter` is a probe bug -- counts neither header nor rows.
-    $out = Invoke-RemoteCommand -Ip $leaderIp -Command "$consulEnv consul operator raft list-peers | grep -c '192.168.10' || true"
+    $out = Invoke-RemoteCommand -Ip $leaderIp -Command "$consulEnv $consulTokenEnv consul operator raft list-peers | grep -c '192.168.10' || true"
     $out -match '^3$'
 } | Out-Null
 

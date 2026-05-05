@@ -240,3 +240,21 @@ variable "vault_pki_consul_role_name" {
   type        = string
   default     = "consul-server"
 }
+
+variable "enable_consul_acl" {
+  description = "Phase 0.E.2.3 toggle: enable Consul ACL system cluster-wide. Bootstraps a management token (one-shot, persisted to Vault KV at nexus/swarm/consul-bootstrap-token), creates 6 per-agent policies + tokens (written to nexus/swarm/agent-tokens/<host>), drops Vault Agent template that renders /etc/consul.d/30-acl-token.hcl with each node's agent token, and tightens default_policy to deny via sequential rolling restart. Default true (steady state per memory/feedback_terraform_partial_apply_destroys_resources.md). Set false to keep cluster on legacy no-ACL mode (lab iteration)."
+  type        = bool
+  default     = true
+}
+
+variable "vault_1_ip" {
+  description = "VMnet11 IP of vault-1 -- the build host orchestrates KV writes (consul-bootstrap-token, agent-tokens/<host>) by SSH'ing here and running `vault kv put` locally. Mirrors the pattern in nexus-infra-vmware/terraform/envs/security/role-overlay-vault-swarm-secrets-seed.tf."
+  type        = string
+  default     = "192.168.70.121"
+}
+
+variable "vault_init_keys_file" {
+  description = "Path on the build host to the Vault init JSON sidecar (root_token + unseal keys), produced by nexus-infra-vmware's `vault_post_init` overlay at 0.D.1. The 0.E.2.3 ACL overlay reads root_token from this file to authenticate the KV writes against vault-1. Default mirrors nexus-infra-vmware/security env's variable of the same name."
+  type        = string
+  default     = "$HOME/.nexus/vault-init.json"
+}

@@ -103,8 +103,28 @@ foreach ($ip in $allIps) {
 
 # ─── Section: keyring converged across all agents ─────────────────────────
 # Probes target the TLS endpoint (steady state post-0.E.2.2: HTTP/8500 is
-# hard-cut, only HTTPS/8501 listens).
+# hard-cut, only HTTPS/8501 listens). Post-0.E.2.3, ACL is enforced with
+# default_policy=deny -- consul probes need the mgmt token. Resolve from
+# Vault KV; fall back to tokenless calls (pre-0.E.2.3 baseline behavior).
 $consulEnv = "CONSUL_HTTP_ADDR=https://localhost:8501 CONSUL_CACERT=/etc/ssl/certs/consul-ca.pem"
+$consulMgmtToken = ''
+$keysFileE21 = Join-Path $env:USERPROFILE '.nexus/vault-init.json'
+if (Test-Path $keysFileE21) {
+    try {
+        $rootTokenE21 = (Get-Content $keysFileE21 | ConvertFrom-Json).root_token
+        if ($rootTokenE21) {
+            $kvProbe = @"
+set -euo pipefail
+export VAULT_TOKEN='$rootTokenE21'
+VAULT_ADDR=https://127.0.0.1:8200 VAULT_SKIP_VERIFY=true vault kv get -field=management_token -mount=nexus swarm/consul-bootstrap-token 2>/dev/null || true
+"@
+            $kvProbeB64 = [Convert]::ToBase64String([System.Text.UTF8Encoding]::new($false).GetBytes(($kvProbe -replace "`r`n", "`n")))
+            $kvOut = (ssh @sshOpts "$user@192.168.70.121" "echo '$kvProbeB64' | base64 -d | bash" 2>&1 | Out-String).Trim()
+            if ($kvOut -and $kvOut.Length -ge 36) { $consulMgmtToken = $kvOut }
+        }
+    } catch { }
+}
+$consulTokenEnv = if ($consulMgmtToken) { "CONSUL_HTTP_TOKEN='$consulMgmtToken'" } else { '' }
 
 Write-Section 'Consul keyring -list reports 6/6 alive (gossip encryption uniform)'
 $leaderIp = $managerIps[0]
@@ -119,29 +139,29 @@ Test-Check -Description "$leaderIp : consul keyring -list shows 6/6 alive on a s
     #
     #   nexus-lab (LAN):
     #     <key> [6/6]
-    $out = Invoke-RemoteCommand -Ip $leaderIp -Command "$consulEnv consul keyring -list 2>&1"
+    $out = Invoke-RemoteCommand -Ip $leaderIp -Command "$consulEnv $consulTokenEnv consul keyring -list 2>&1"
     # Look for at least one key with [6/6] in the LAN section
     $out -match '\[6/6\]'
 } | Out-Null
 
 Test-Check -Description "$leaderIp : exactly 1 key in LAN keyring (no orphan keys from rotation)" -Probe {
-    $out = Invoke-RemoteCommand -Ip $leaderIp -Command "$consulEnv consul keyring -list 2>&1 | sed -n '/(LAN):/,/^`$/p' | grep -c '^\s*[A-Za-z0-9+/]\{40,\}' || true"
+    $out = Invoke-RemoteCommand -Ip $leaderIp -Command "$consulEnv $consulTokenEnv consul keyring -list 2>&1 | sed -n '/(LAN):/,/^`$/p' | grep -c '^\s*[A-Za-z0-9+/]\{40,\}' || true"
     # If the count is 0 from sed not matching, fall back to less specific check
     if ($out -match '^[0-9]+$' -and [int]$out -ge 1) { return $true }
     # Fallback: just confirm SOME LAN key exists
-    $out2 = Invoke-RemoteCommand -Ip $leaderIp -Command "$consulEnv consul keyring -list 2>&1 | grep -c '\[6/6\]' || true"
+    $out2 = Invoke-RemoteCommand -Ip $leaderIp -Command "$consulEnv $consulTokenEnv consul keyring -list 2>&1 | grep -c '\[6/6\]' || true"
     return ($out2 -match '^[1-9]')
 } | Out-Null
 
 # ─── Section: cluster operational state still green ───────────────────────
 Write-Section 'Cluster still operational after rolling consul restart'
 Test-Check -Description "$leaderIp : consul members reports 6 alive" -Probe {
-    $out = Invoke-RemoteCommand -Ip $leaderIp -Command "$consulEnv consul members 2>&1 | grep -c alive || true"
+    $out = Invoke-RemoteCommand -Ip $leaderIp -Command "$consulEnv $consulTokenEnv consul members 2>&1 | grep -c alive || true"
     $out -match '^6$'
 } | Out-Null
 
 Test-Check -Description "$leaderIp : consul raft has a leader" -Probe {
-    $out = Invoke-RemoteCommand -Ip $leaderIp -Command "$consulEnv consul operator raft list-peers 2>&1 | grep -c '^.*leader' || true"
+    $out = Invoke-RemoteCommand -Ip $leaderIp -Command "$consulEnv $consulTokenEnv consul operator raft list-peers 2>&1 | grep -c '^.*leader' || true"
     $out -match '^[1-9]'
 } | Out-Null
 

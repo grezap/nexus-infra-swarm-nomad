@@ -64,6 +64,28 @@ $caBundle = Join-Path $env:USERPROFILE '.nexus/vault-ca-bundle.crt'
 $sshOpts = @('-o', 'ConnectTimeout=5', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=no')
 $envPrefix = "CONSUL_HTTP_ADDR=https://localhost:8501 CONSUL_CACERT=/etc/ssl/certs/consul-ca.pem"
 
+# Post-0.E.2.3: ACL is enforced. Resolve mgmt token from Vault KV; fall back
+# to tokenless calls (pre-0.E.2.3 baseline behavior). Same pattern as 0.E.1
+# and 0.E.2.1.
+$consulMgmtToken = ''
+$keysFileE22 = Join-Path $env:USERPROFILE '.nexus/vault-init.json'
+if (Test-Path $keysFileE22) {
+    try {
+        $rootTokenE22 = (Get-Content $keysFileE22 | ConvertFrom-Json).root_token
+        if ($rootTokenE22) {
+            $kvProbeBody = @"
+set -euo pipefail
+export VAULT_TOKEN='$rootTokenE22'
+VAULT_ADDR=https://127.0.0.1:8200 VAULT_SKIP_VERIFY=true vault kv get -field=management_token -mount=nexus swarm/consul-bootstrap-token 2>/dev/null || true
+"@
+            $kvProbeB64 = [Convert]::ToBase64String([System.Text.UTF8Encoding]::new($false).GetBytes(($kvProbeBody -replace "`r`n", "`n")))
+            $kvOut = (ssh @sshOpts "$user@192.168.70.121" "echo '$kvProbeB64' | base64 -d | bash" 2>&1 | Out-String).Trim()
+            if ($kvOut -and $kvOut.Length -ge 36) { $consulMgmtToken = $kvOut }
+        }
+    } catch { }
+}
+$consulTokenEnv = if ($consulMgmtToken) { "CONSUL_HTTP_TOKEN='$consulMgmtToken'" } else { '' }
+
 $failures = @()
 
 function Write-Section([string]$title) {
@@ -273,17 +295,17 @@ Write-Section 'Cluster shape over HTTPS (mutual TLS for RPC verified)'
 $leaderIp = $managerIps[0]
 
 Test-Check -Description "$leaderIp : consul members over HTTPS reports 6 alive" -Probe {
-    $out = Invoke-RemoteCommand -Ip $leaderIp -Command "$envPrefix consul members 2>&1 | grep -c alive || true"
+    $out = Invoke-RemoteCommand -Ip $leaderIp -Command "$envPrefix $consulTokenEnv consul members 2>&1 | grep -c alive || true"
     $out -match '^6$'
 } | Out-Null
 
 Test-Check -Description "$leaderIp : consul raft list-peers over HTTPS reports 3 server peers" -Probe {
-    $out = Invoke-RemoteCommand -Ip $leaderIp -Command "$envPrefix consul operator raft list-peers 2>&1 | grep -c '192.168.10' || true"
+    $out = Invoke-RemoteCommand -Ip $leaderIp -Command "$envPrefix $consulTokenEnv consul operator raft list-peers 2>&1 | grep -c '192.168.10' || true"
     $out -match '^3$'
 } | Out-Null
 
 Test-Check -Description "$leaderIp : raft list-peers shows exactly 1 leader" -Probe {
-    $out = Invoke-RemoteCommand -Ip $leaderIp -Command "$envPrefix consul operator raft list-peers 2>&1 | grep -c 'leader' || true"
+    $out = Invoke-RemoteCommand -Ip $leaderIp -Command "$envPrefix $consulTokenEnv consul operator raft list-peers 2>&1 | grep -c 'leader' || true"
     $out -match '^1$'
 } | Out-Null
 
