@@ -100,7 +100,7 @@ resource "null_resource" "consul_tls" {
     # PKI role config (allowed_domains, leaf TTL) pulled from security env --
     # captured here so a security-env knob bump re-issues per-node certs.
     pki_role_name = var.vault_pki_consul_role_name
-    consul_tls_v  = "1"
+    consul_tls_v  = "2" # v2 = ports.grpc=-1 + ports.grpc_tls=8503 (Consul 1.20+ split gRPC into TLS/plain listeners; v1's tls{} block + firstboot's grpc=8502 caused "ports.grpc listener no longer supports TLS" startup error). v1 = original.
   }
 
   depends_on = [null_resource.swarm_vault_agent, null_resource.consul_gossip_encrypt]
@@ -224,6 +224,16 @@ tls {
 ports {
   http  = -1
   https = 8501
+
+  # Consul 1.20+ split gRPC into TLS / plain listeners. With TLS enabled,
+  # ports.grpc = <N> alongside no ports.grpc_tls is a hard error
+  # ("the ports.grpc listener no longer supports TLS. Use ports.grpc_tls
+  #  instead..."). Disable the plain channel + put the TLS-bearing gRPC
+  # endpoint on 8503. Used by Consul Connect xDS / Envoy when service
+  # mesh lands in 0.E.5+. The VMnet10 backplane nftables rule (whole-
+  # segment trust) covers 8503.
+  grpc     = -1
+  grpc_tls = 8503
 }
 
 # Consul's internal "auto-encrypt" is OFF -- we issue per-node certs via
