@@ -100,7 +100,7 @@ resource "null_resource" "consul_tls" {
     # PKI role config (allowed_domains, leaf TTL) pulled from security env --
     # captured here so a security-env knob bump re-issues per-node certs.
     pki_role_name = var.vault_pki_consul_role_name
-    consul_tls_v  = "2" # v2 = ports.grpc=-1 + ports.grpc_tls=8503 (Consul 1.20+ split gRPC into TLS/plain listeners; v1's tls{} block + firstboot's grpc=8502 caused "ports.grpc listener no longer supports TLS" startup error). v1 = original.
+    consul_tls_v  = "3" # v3 = (a) connect{enabled=false} override (Connect's auto-bootstrapped CA + per-server cert with SAN server.<dc>.peering.<trust-domain>.consul caused verify_server_hostname mismatches during sequential rolling), (b) parallel "big-bang" restart in phase 3 (sequential rolling RPC fails both directions: verify_outgoing rejects plaintext peers + verify_incoming rejects plaintext callers; ~10-30s cluster outage in exchange for clean convergence), (c) ports.grpc_tls=-1 since Connect is off. v2 = grpc_tls=8503 fix. v1 = original.
   }
 
   depends_on = [null_resource.swarm_vault_agent, null_resource.consul_gossip_encrypt]
@@ -226,14 +226,29 @@ ports {
   https = 8501
 
   # Consul 1.20+ split gRPC into TLS / plain listeners. With TLS enabled,
-  # ports.grpc = <N> alongside no ports.grpc_tls is a hard error
-  # ("the ports.grpc listener no longer supports TLS. Use ports.grpc_tls
-  #  instead..."). Disable the plain channel + put the TLS-bearing gRPC
-  # endpoint on 8503. Used by Consul Connect xDS / Envoy when service
-  # mesh lands in 0.E.5+. The VMnet10 backplane nftables rule (whole-
-  # segment trust) covers 8503.
+  # ports.grpc = <N> alongside no ports.grpc_tls is a hard error.
+  # Disable both since Connect is OFF (below) and we don't use the plain
+  # gRPC channel for anything in the lab. Re-enable + define grpc_tls=8503
+  # when 0.E.5+ brings up Connect service mesh.
   grpc     = -1
-  grpc_tls = 8503
+  grpc_tls = -1
+}
+
+# DISABLE Connect (overrides firstboot's `connect { enabled = true }`).
+# Reason: Connect auto-bootstraps its own CA + per-server Connect identity
+# certs (SAN = "server.<dc>.peering.<trust-domain>.consul"). With our
+# verify_server_hostname=true on internal_rpc, Consul expects the simpler
+# "server.<dc>.consul" SAN -- which our PKI-issued certs DO have. But
+# during inter-node Raft RPC, Connect-enabled peers may present their
+# Connect-internal cert (with the peering-SAN) instead of our manual cert,
+# causing verification failures + cluster split.
+#
+# Connect / E15 service mesh was always deferred to 0.E.5 per Greg's #8
+# decision in 0.E.2 scoping. Disabling here leaves the Connect data in
+# Raft dormant -- re-enabling later (with proper PKI integration) is
+# non-destructive.
+connect {
+  enabled = false
 }
 
 # Consul's internal "auto-encrypt" is OFF -- we issue per-node certs via
@@ -249,18 +264,19 @@ export CONSUL_HTTP_ADDR=https://127.0.0.1:8501
 export CONSUL_CACERT=/etc/consul.d/tls/ca.pem
 '@
 
-      # ─── Per-node loop ─────────────────────────────────────────────────
+      # ─── Phase 1 (sequential per node, doesn't restart consul): ────────
+      # Install split script + drop per-host Vault Agent PKI template +
+      # restart vault-agent. Wait for cert files to render. This phase is
+      # safe to run sequentially because it only touches vault-agent +
+      # /etc/consul.d/tls/ -- consul.service keeps running on plain HTTP
+      # until Phase 3.
       foreach ($node in $nodes) {
         $nodeHost = $node.Host
         $vmIp     = $node.VmIp
         $vmnet10  = $node.Vmnet10
         Write-Host ""
-        Write-Host "[consul-tls $${nodeHost}] enrolling in TLS..."
+        Write-Host "[consul-tls $${nodeHost}] Phase 1 -- cert render"
 
-        # ─ Per-node Vault Agent template (per-host SANs) ─
-        # ip_sans includes both VMnet10 backplane + VMnet11 mgmt + 127.0.0.1.
-        # alt_names includes server.nexus-lab.consul (required for
-        # verify_server_hostname=true) + hostname forms + localhost.
         $altNames = "$nodeHost,$nodeHost.nexus.lab,server.nexus-lab.consul,localhost"
         $ipSans   = "$vmnet10,$vmIp,127.0.0.1"
         $cn       = "$nodeHost.consul.nexus.lab"
@@ -289,45 +305,33 @@ EOT
 }
 "@
 
-        # Encode all artifacts via base64 for safe transit.
-        $splitB64    = [Convert]::ToBase64String([System.Text.UTF8Encoding]::new($false).GetBytes($splitScript))
-        $tlsConfigB64 = [Convert]::ToBase64String([System.Text.UTF8Encoding]::new($false).GetBytes($tlsConfig))
-        $envProfileB64 = [Convert]::ToBase64String([System.Text.UTF8Encoding]::new($false).GetBytes($envProfile))
-        $vaB64       = [Convert]::ToBase64String([System.Text.UTF8Encoding]::new($false).GetBytes($vaultAgentTemplate))
+        $splitB64 = [Convert]::ToBase64String([System.Text.UTF8Encoding]::new($false).GetBytes($splitScript))
+        $vaB64    = [Convert]::ToBase64String([System.Text.UTF8Encoding]::new($false).GetBytes($vaultAgentTemplate))
 
-        # Step 1+2: install split script + drop Vault Agent template +
-        # restart vault-agent + ensure tls dir exists with right perms.
         $stage1 = @"
 set -euo pipefail
 sudo mkdir -p /etc/consul.d/tls
 sudo chown root:consul /etc/consul.d/tls
 sudo chmod 0750 /etc/consul.d/tls
 
-# Split script
 echo '$splitB64' | base64 -d | sudo tee /usr/local/sbin/consul-tls-split.sh > /dev/null
 sudo chown root:root /usr/local/sbin/consul-tls-split.sh
 sudo chmod 0755 /usr/local/sbin/consul-tls-split.sh
 
-# Vault Agent template
 echo '$vaB64' | base64 -d | sudo tee /etc/vault-agent/20-template-tls.hcl > /dev/null
 sudo chown root:root /etc/vault-agent/20-template-tls.hcl
 sudo chmod 0644 /etc/vault-agent/20-template-tls.hcl
 
-# Restart vault-agent so it picks up the new template stanza
 sudo systemctl restart nexus-vault-agent.service
 "@
         $stage1B64 = [Convert]::ToBase64String([System.Text.UTF8Encoding]::new($false).GetBytes($stage1))
         $stage1Out = ssh @sshOpts "$sshUser@$vmIp" "echo '$stage1B64' | base64 -d | bash" 2>&1 | Out-String
         if ($LASTEXITCODE -ne 0) {
           Write-Host $stage1Out.Trim()
-          throw "[consul-tls $${nodeHost}] stage1 (split + va template) failed (rc=$LASTEXITCODE)"
+          throw "[consul-tls $${nodeHost}] phase1 (cert render) failed (rc=$LASTEXITCODE)"
         }
 
-        # Step 3: wait for cert files to materialize. Vault Agent renders
-        # the bundle then runs the split script; we observe the resulting
-        # 3 files. Probe the SAN of server.crt to confirm it's the right
-        # cert (right CN for this host), not a stale one from a prior cycle.
-        Write-Host "[consul-tls $${nodeHost}] waiting for cert render + split..."
+        # Wait for cert + verify CN
         $deadline = (Get-Date).AddSeconds(60)
         $rendered = $false
         while ((Get-Date) -lt $deadline) {
@@ -341,67 +345,110 @@ sudo systemctl restart nexus-vault-agent.service
           throw "[consul-tls $${nodeHost}] cert files not rendered (CN=$cn) within 60s"
         }
         Write-Host "[consul-tls $${nodeHost}] cert rendered (CN=$cn)"
+      }
 
-        # Step 4+5+6: drop tls config + env profile + nftables 8501 + restart consul
-        $stage2 = @"
+      Write-Host ""
+      Write-Host "[consul-tls] Phase 1 complete -- all 6 nodes have cert files."
+      Write-Host "[consul-tls] Phase 2 -- dropping TLS config + env profile + nftables on all 6 (parallel, no restart yet)..."
+
+      # ─── Phase 2 (parallel, no consul restart): ─────────────────────────
+      # Drop /etc/consul.d/20-tls.hcl + /etc/profile.d/consul-tls.sh +
+      # nftables 8501 rule on all 6 nodes simultaneously. Consul keeps
+      # running on plain HTTP -- the new config file isn't loaded until
+      # Phase 3 restart. This split lets us minimize the cluster outage
+      # window in Phase 3.
+      $tlsConfigB64  = [Convert]::ToBase64String([System.Text.UTF8Encoding]::new($false).GetBytes($tlsConfig))
+      $envProfileB64 = [Convert]::ToBase64String([System.Text.UTF8Encoding]::new($false).GetBytes($envProfile))
+
+      $stage2 = @"
 set -euo pipefail
-
-# /etc/consul.d/20-tls.hcl (TLS config; ports.http=-1; ports.https=8501)
 echo '$tlsConfigB64' | base64 -d | sudo tee /etc/consul.d/20-tls.hcl > /dev/null
 sudo chown root:consul /etc/consul.d/20-tls.hcl
 sudo chmod 0640 /etc/consul.d/20-tls.hcl
 
-# /etc/profile.d/consul-tls.sh (operator env defaults)
 echo '$envProfileB64' | base64 -d | sudo tee /etc/profile.d/consul-tls.sh > /dev/null
 sudo chown root:root /etc/profile.d/consul-tls.sh
 sudo chmod 0644 /etc/profile.d/consul-tls.sh
 
-# nftables: ensure 8501 from VMnet11 is allowed (idempotent rule add).
-# The baseline rule already allows {8500, 4646}; we add 8501 by replacing
-# the rule via nft -f /etc/nftables.conf if not already present.
 if ! sudo nft list chain inet filter input 2>/dev/null | grep -q 'tcp dport.*8501'; then
-  # Append the runtime rule (will be picked up by next nftables.service
-  # reload OR persisted via the file rewrite below). For now, live-add.
   sudo nft add rule inet filter input iifname \"nic0\" ip saddr 192.168.70.0/24 tcp dport 8501 accept comment '"Consul HTTPS UI from VMnet11 (0.E.2.2)"'
 fi
-
-# Restart consul.service to pick up TLS config (initial TLS enable benefits
-# from full restart vs reload; subsequent cert rotations use SIGHUP/reload
-# via the split script).
-sudo systemctl restart consul.service
 "@
-        $stage2B64 = [Convert]::ToBase64String([System.Text.UTF8Encoding]::new($false).GetBytes($stage2))
-        $stage2Out = ssh @sshOpts "$sshUser@$vmIp" "echo '$stage2B64' | base64 -d | bash" 2>&1 | Out-String
-        if ($LASTEXITCODE -ne 0) {
-          Write-Host $stage2Out.Trim()
-          throw "[consul-tls $${nodeHost}] stage2 (config + restart) failed (rc=$LASTEXITCODE)"
-        }
+      $stage2B64 = [Convert]::ToBase64String([System.Text.UTF8Encoding]::new($false).GetBytes($stage2))
 
-        # Step 7: wait for consul to be back + serving HTTPS on 8501
-        Write-Host "[consul-tls $${nodeHost}] waiting for consul HTTPS on 8501..."
-        $consulDeadline = (Get-Date).AddSeconds(90)
-        $consulReady = $false
-        while ((Get-Date) -lt $consulDeadline) {
-          $status = (ssh @sshOpts "$sshUser@$vmIp" "systemctl is-active consul.service" 2>&1 | Out-String).Trim()
+      # Parallel SSH fan-out via ForEach-Object -Parallel (PS7+).
+      $phase2Errors = $nodes | ForEach-Object -ThrottleLimit 6 -Parallel {
+        $node = $_
+        $sshUser = $using:sshUser
+        $sshOpts = $using:sshOpts
+        $stage2B64 = $using:stage2B64
+        $out = ssh @sshOpts "$sshUser@$($node.VmIp)" "echo '$stage2B64' | base64 -d | bash" 2>&1 | Out-String
+        if ($LASTEXITCODE -ne 0) {
+          return "[$($node.Host)] phase2 failed (rc=$LASTEXITCODE): $($out.Trim())"
+        }
+        return $null
+      } | Where-Object { $_ -ne $null }
+
+      if ($phase2Errors.Count -gt 0) {
+        $phase2Errors | ForEach-Object { Write-Host $_ -ForegroundColor Red }
+        throw "[consul-tls] phase2 (TLS config drop) failed on $($phase2Errors.Count) node(s)"
+      }
+      Write-Host "[consul-tls] Phase 2 complete -- TLS config staged on all 6 nodes."
+
+      Write-Host ""
+      Write-Host "[consul-tls] Phase 3 -- big-bang restart of consul.service on all 6 (parallel)..."
+      Write-Host "[consul-tls] (~10-30s cluster outage; all nodes converge with TLS simultaneously)"
+
+      # ─── Phase 3 (parallel, big-bang restart): ──────────────────────────
+      # systemctl restart consul.service on all 6 simultaneously. This
+      # avoids the chicken-and-egg of sequential rolling -- if some nodes
+      # had TLS while others didn't, RPC handshakes would fail in both
+      # directions (verify_outgoing rejects plaintext peers, verify_incoming
+      # rejects plaintext callers). Parallel restart means all 6 come back
+      # up with TLS within seconds of each other; cluster reconverges.
+      $phase3Errors = $nodes | ForEach-Object -ThrottleLimit 6 -Parallel {
+        $node = $_
+        $sshUser = $using:sshUser
+        $sshOpts = $using:sshOpts
+        $out = ssh @sshOpts "$sshUser@$($node.VmIp)" "sudo systemctl restart consul.service" 2>&1 | Out-String
+        if ($LASTEXITCODE -ne 0) {
+          return "[$($node.Host)] phase3 restart failed (rc=$LASTEXITCODE): $($out.Trim())"
+        }
+        return $null
+      } | Where-Object { $_ -ne $null }
+
+      if ($phase3Errors.Count -gt 0) {
+        $phase3Errors | ForEach-Object { Write-Host $_ -ForegroundColor Red }
+        throw "[consul-tls] phase3 (consul restart) failed on $($phase3Errors.Count) node(s)"
+      }
+      Write-Host "[consul-tls] Phase 3 complete -- restart commands issued; waiting for cluster to converge..."
+
+      # Wait per-node for HTTPS:8501 to be reachable (parallel polling).
+      $phase3WaitErrors = $nodes | ForEach-Object -ThrottleLimit 6 -Parallel {
+        $node = $_
+        $sshUser = $using:sshUser
+        $sshOpts = $using:sshOpts
+        $deadline = (Get-Date).AddSeconds(120)
+        while ((Get-Date) -lt $deadline) {
+          $status = (ssh @sshOpts "$sshUser@$($node.VmIp)" "systemctl is-active consul.service" 2>&1 | Out-String).Trim()
           if ($status -eq 'active') {
-            # Probe HTTPS API directly via curl + the new CA bundle.
-            # /v1/status/leader returns "" (empty) before quorum is restored;
-            # any HTTP 200 (even with empty body) means TLS is up.
-            $probe = (ssh @sshOpts "$sshUser@$vmIp" "curl -sS --cacert /etc/consul.d/tls/ca.pem -o /dev/null -w '%%{http_code}' https://127.0.0.1:8501/v1/status/leader 2>&1" 2>&1 | Out-String).Trim()
-            if ($probe -match '^200$') { $consulReady = $true; break }
+            $probe = (ssh @sshOpts "$sshUser@$($node.VmIp)" "curl -sS --cacert /etc/consul.d/tls/ca.pem -o /dev/null -w '%%{http_code}' https://127.0.0.1:8501/v1/status/leader 2>&1" 2>&1 | Out-String).Trim()
+            if ($probe -match '^200$') { return $null }
           }
           Start-Sleep -Seconds 3
         }
-        if (-not $consulReady) {
-          $journal = (ssh @sshOpts "$sshUser@$vmIp" "sudo journalctl -u consul.service --no-pager -n 30" 2>&1 | Out-String)
-          Write-Host $journal
-          throw "[consul-tls $${nodeHost}] consul HTTPS:8501 not ready within 90s"
-        }
-        Write-Host "[consul-tls $${nodeHost}] consul HTTPS:8501 active (TLS handshake OK)"
+        $journal = (ssh @sshOpts "$sshUser@$($node.VmIp)" "sudo journalctl -u consul.service --no-pager -n 30" 2>&1 | Out-String)
+        return "[$($node.Host)] consul HTTPS:8501 not ready within 120s; journal:`n$journal"
+      } | Where-Object { $_ -ne $null }
+
+      if ($phase3WaitErrors.Count -gt 0) {
+        $phase3WaitErrors | ForEach-Object { Write-Host $_ -ForegroundColor Red }
+        throw "[consul-tls] phase3 wait (HTTPS:8501 ready) failed on $($phase3WaitErrors.Count) node(s)"
       }
+      Write-Host "[consul-tls] Phase 3 complete -- HTTPS:8501 active on all 6 nodes."
 
       Write-Host ""
-      Write-Host "[consul-tls] all 6 nodes enrolled. Verifying cluster shape over TLS..."
+      Write-Host "[consul-tls] all 6 nodes TLS-enabled. Verifying cluster shape over TLS..."
       Start-Sleep -Seconds 10
 
       # Cluster-wide verification from leader's perspective. Use env vars
