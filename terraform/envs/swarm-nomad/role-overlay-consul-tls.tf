@@ -100,7 +100,7 @@ resource "null_resource" "consul_tls" {
     # PKI role config (allowed_domains, leaf TTL) pulled from security env --
     # captured here so a security-env knob bump re-issues per-node certs.
     pki_role_name = var.vault_pki_consul_role_name
-    consul_tls_v  = "4" # v4 = world-readable CA bundle copy at /etc/ssl/certs/consul-ca.pem (operator/CLI access; /etc/consul.d/ is 0750 root:consul, non-consul users can't traverse to reach the original ca.pem). v3 = connect off + parallel restart. v2 = grpc_tls=8503. v1 = original.
+    consul_tls_v  = "5" # v5 = manual split-script invocation at end of stage1 (Vault Agent's pkiCert caches; a restart with an unchanged cert -> no destination write -> no command invocation, so v4's new split-script logic never ran on a node where v3 had already rendered the cert; manual run is idempotent + guarantees per-version outputs land). v4 = /etc/ssl/certs/consul-ca.pem operator copy. v3 = connect off + parallel restart. v2 = grpc_tls=8503. v1 = original.
   }
 
   depends_on = [null_resource.swarm_vault_agent, null_resource.consul_gossip_encrypt]
@@ -336,6 +336,25 @@ sudo chown root:root /etc/vault-agent/20-template-tls.hcl
 sudo chmod 0644 /etc/vault-agent/20-template-tls.hcl
 
 sudo systemctl restart nexus-vault-agent.service
+
+# Wait for bundle.pem to materialize (Vault Agent renders templates a few
+# seconds after startup). Once present, run the split script manually --
+# DON'T rely on Vault Agent's command-on-render trigger because pkiCert
+# results are CACHED (so a vault-agent restart with an unchanged cert doesn't
+# trigger the destination write -> no command invocation -> the new split
+# script's logic never runs). Manual invocation is idempotent + guarantees
+# the script-versioned outputs (e.g. /etc/ssl/certs/consul-ca.pem in v4)
+# land regardless of cache state.
+for i in 1 2 3 4 5 6 7 8 9 10; do
+  sudo test -s /etc/consul.d/tls/bundle.pem && break
+  sleep 2
+done
+if ! sudo test -s /etc/consul.d/tls/bundle.pem; then
+  echo "[stage1] ERROR: bundle.pem not rendered within 20s after vault-agent restart" >&2
+  sudo journalctl -u nexus-vault-agent.service --no-pager -n 20 >&2
+  exit 1
+fi
+sudo /usr/local/sbin/consul-tls-split.sh
 "@
         $stage1B64 = [Convert]::ToBase64String([System.Text.UTF8Encoding]::new($false).GetBytes($stage1))
         $stage1Out = ssh @sshOpts "$sshUser@$vmIp" "echo '$stage1B64' | base64 -d | bash" 2>&1 | Out-String
