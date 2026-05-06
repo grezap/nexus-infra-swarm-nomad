@@ -86,7 +86,7 @@ resource "null_resource" "swarm_vault_agent" {
     # Capture the sidecar's content hash so terraform re-runs when the
     # security env regenerates the secret-id (every apply rotates it).
     creds_file_hash    = filesha256("${local.vault_agent_creds_dir_expanded}/vault-agent-${each.key}.json")
-    swarm_va_overlay_v = "2" # v2 = ERROR-on-missing-creds (was WARN+skip; v1 silently exited 0 when the security env's first apply produced wrongly-named sidecars, leaving terraform thinking the resource was created when it had skipped); also added creds_file_hash trigger so re-applies pick up rotated secret-ids. v1 = original.
+    swarm_va_overlay_v = "2" # v2 = ERROR-on-missing-creds (was WARN+skip; v1 silently exited 0 when the security env's first apply produced wrongly-named sidecars, leaving terraform thinking the resource was created when it had skipped); also added creds_file_hash trigger so re-applies pick up rotated secret-ids. v1 = original. (NOTE: the rendered systemd unit body now includes RuntimeDirectory=nexus-vault-agent + LogsDirectory=nexus-vault-agent -- the canonical reboot-survival fix for /var/run tmpfs wipe. Trigger version intentionally NOT bumped to avoid cascading the 6-agent reinstall on 0.E.3.3a's atomic apply; the new unit content lands automatically on 0.E.3.3b's apply when creds_file_hash rotates from the security-env secret-id rotation. Manual remediation already applied to the running cluster on 2026-05-06 by `mkdir -p /var/run/nexus-vault-agent` on all 6 nodes; that ad-hoc fix is fine until reboot, at which point the rotation cascade will have written the systemd unit with RuntimeDirectory= for permanent fix.)
 
     # Captured here for the destroy provisioner -- terraform restricts
     # destroy provisioners to `self`, `count.index`, and `each.key`. We
@@ -265,6 +265,17 @@ ConditionFileIsExecutable=/usr/local/bin/vault
 Type=simple
 User=root
 Group=root
+# RuntimeDirectory= -- v3 fix. systemd auto-creates /run/nexus-vault-agent
+# (= /var/run/nexus-vault-agent) on every service start. Critical because
+# /var/run is tmpfs and the install-time `mkdir -p /var/run/nexus-vault-
+# agent` did NOT survive host reboots -- post-reboot all 6 agents crash-
+# looped with "error creating file sink: no such file or directory" when
+# trying to write the AppRole token sink. RuntimeDirectoryMode=0755 mirrors
+# the install-time chmod.
+RuntimeDirectory=nexus-vault-agent
+RuntimeDirectoryMode=0755
+LogsDirectory=nexus-vault-agent
+LogsDirectoryMode=0755
 ExecStart=/usr/local/bin/vault agent -config=/etc/vault-agent/
 ExecReload=/bin/kill -HUP \`$MAINPID
 KillMode=process

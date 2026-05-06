@@ -105,14 +105,114 @@ Destroy flow:
 
 Gateway dhcp-host reservations stay live (they belong to foundation env). To drop them, run `nexus-infra-vmware`'s foundation env with `-Vars enable_swarm_dhcp_reservations=false`.
 
-## §2 Forward direction
+## §2 Phase status
 
 | Sub-phase | Scope | Status |
 |---|---|---|
-| 0.E.1 | Swarm cluster bring-up | 🟡 in progress (this document covers it) |
-| 0.E.2 | Consul harden (TLS, ACLs, gossip encryption) | ⏭ planned |
-| 0.E.3 | Nomad harden (ACLs, TLS, Vault token integration) | ⏭ planned |
-| 0.E.4 | Portainer EE clustered Swarm service | ⏭ planned |
-| 0.E.5 | Vault Agents on every node + PKI leaves | ⏭ planned |
+| 0.E.1 | Swarm cluster bring-up | ✅ closed |
+| 0.E.2 | Consul harden (gossip encrypt + TLS + ACL deny-mode) | ✅ closed |
+| 0.E.3 | Nomad harden (TLS + ACL + → Consul HTTPS + Vault integration) | ✅ closed |
+| 0.E.4 | Portainer CE clustered Swarm service | ✅ closed |
+| 0.E.5 | Close-out canon batch (MASTER-PLAN + ADRs + vms.yaml + glossary) | 🟡 next |
 
-Exit gate for the whole phase (per `MASTER-PLAN.md` line 151): `docker node ls` shows 6, `nomad server members` shows 3.
+Exit gate cumulative: `docker node ls` = 6, `nomad server members` = 3, `consul members` = 6, Portainer UI reachable at `https://portainer.nexus.lab:9443` with CA-validated TLS. ~180-check chained smoke gate (`scripts/smoke-0.E.4.ps1`) ALL GREEN.
+
+## §3 Operator runbooks
+
+### 3.1 Retrieving the Portainer admin password
+
+Generated at 0.E.4d apply time as a 24-char alphanumeric plaintext + bcrypt hash, sticky-seeded in Vault KV. Sticky semantic: re-applies preserve, never overwrite — operator can rotate by `vault kv put` directly.
+
+```pwsh
+# From the build host -- root-token to vault-1:
+$rootToken = (Get-Content $HOME\.nexus\vault-init.json | ConvertFrom-Json).root_token
+ssh nexusadmin@192.168.70.121 "VAULT_TOKEN='$rootToken' VAULT_ADDR=https://127.0.0.1:8200 VAULT_SKIP_VERIFY=true vault kv get -mount=nexus portainer/admin-bcrypt"
+```
+
+UI: `https://portainer.nexus.lab:9443`. Login user: `admin`.
+
+To rotate the password manually (lab-only — production would generate via Vault's password-policy + audit log):
+
+```bash
+# On vault-1, after `vault login` with root token:
+NEW=$(openssl rand -base64 24 | tr -dc 'a-zA-Z0-9' | head -c 24)
+NEW_BCRYPT=$(python3 -c "import bcrypt, sys; sys.stdout.write(bcrypt.hashpw(sys.argv[1].encode(), bcrypt.gensalt(rounds=10)).decode())" "$NEW")
+vault kv put -mount=nexus portainer/admin-bcrypt bcrypt_hash="$NEW_BCRYPT" plaintext="$NEW" status="rotated" rotated_at="$(date -u +%FT%TZ)"
+# Vault Agent on each manager re-renders /etc/portainer/admin-password.txt within ~30s.
+# Restart the Portainer Server container so it re-reads the file:
+ssh nexusadmin@192.168.70.111 'sudo docker service update --force portainer_server'
+```
+
+### 3.2 Vault HA reboot recovery (Shamir auto-unseal cascade)
+
+The 3-node Vault HA cluster (vault-1/2/3) auto-unseals via the `nexus-cluster-unseal` transit key on a single-node `vault-transit` companion (192.168.70.124). vault-transit itself uses Shamir (3-of-5). On host reboot vault-transit comes up sealed, so the HA cluster can't auto-unseal and crashloops with `seal wrapper unreachable`.
+
+Recovery (~2 min):
+
+```pwsh
+# 1. Unseal vault-transit with 3 of 5 Shamir keys.
+$j = Get-Content $HOME\.nexus\vault-transit-init.json | ConvertFrom-Json
+foreach ($k in $j.unseal_keys_b64[0..2]) {
+  ssh nexusadmin@192.168.70.124 "VAULT_ADDR=https://127.0.0.1:8200 VAULT_SKIP_VERIFY=true vault operator unseal '$k'"
+}
+
+# 2. Reset systemd failure on HA nodes + restart in parallel.
+@('192.168.70.121','192.168.70.122','192.168.70.123') | ForEach-Object -ThrottleLimit 3 -Parallel {
+  ssh nexusadmin@$_ "sudo systemctl reset-failed vault.service; sudo systemctl start vault.service"
+}
+
+# 3. After ~8s, verify via `vault status` on each HA node.
+foreach ($ip in @('192.168.70.121','192.168.70.122','192.168.70.123')) {
+  Write-Host "=== $ip ==="
+  ssh nexusadmin@$ip "VAULT_ADDR=https://127.0.0.1:8200 VAULT_SKIP_VERIFY=true vault status 2>&1 | grep -E 'Sealed|HA Mode|Active Node'"
+}
+```
+
+After Vault HA recovers, Vault Agent on swarm-nodes might still be crashlooping if `/var/run/nexus-vault-agent/` was wiped (tmpfs gets cleared on reboot). The systemd unit rendered by `role-overlay-swarm-vault-agents.tf` v3+ includes `RuntimeDirectory=nexus-vault-agent` which auto-recreates the dir on every service start, so this only affects pre-v3 deployments. Manual fix:
+
+```pwsh
+@('192.168.70.111','192.168.70.112','192.168.70.113','192.168.70.131','192.168.70.132','192.168.70.133') | ForEach-Object -ThrottleLimit 6 -Parallel {
+  ssh nexusadmin@$_ "sudo mkdir -p /var/run/nexus-vault-agent && sudo systemctl reset-failed nexus-vault-agent.service && sudo systemctl restart nexus-vault-agent.service"
+}
+```
+
+### 3.3 NFS troubleshooting (Portainer state)
+
+Portainer CE's `/data` lives on an NFSv4 export from nexus-gateway (`/srv/nfs/portainer-data` → mounted at `/var/lib/portainer-data` on each manager). Common issues:
+
+| Symptom | Diagnosis | Fix |
+|---|---|---|
+| `mount.nfs4: No such file or directory` | Server's `fsid=0` makes the export the NFSv4 pseudo-root; client must mount via `:/`, not `:/srv/nfs/portainer-data` | fstab entry: `192.168.70.1:/  /var/lib/portainer-data  nfs4  rw,hard,bg,_netdev,vers=4.2,sec=sys  0  0` |
+| `mount.nfs4: timed out` | nftables on gateway dropping tcp/2049 inbound | `ssh nexusadmin@192.168.70.1 "sudo nft list chain inet filter input | grep 2049"` should show 3 manager-IP-specific accept rules |
+| Portainer Server pod can't read `/data` | NFS server unreachable from this manager | `ssh nexusadmin@<manager> "findmnt /var/lib/portainer-data; sudo touch /var/lib/portainer-data/.write-test && sudo rm -f /var/lib/portainer-data/.write-test"` |
+| Stale BoltDB after manual NFS unmount | Portainer can't reattach to BoltDB if the file was open during unmount | `docker service update --force portainer_server` (Swarm reschedules + reattaches) |
+
+Verify NFS export from build host:
+
+```pwsh
+ssh nexusadmin@192.168.70.1 'sudo exportfs -v'
+# Should list 3 manager IPs (.111/.112/.113) with rw,sync,no_root_squash,fsid=0
+```
+
+### 3.4 Smoke gate cheat sheet
+
+```pwsh
+pwsh -File scripts\swarm.ps1 smoke -Phase 0.E.4    # ~180 chained checks
+pwsh -File scripts\swarm.ps1 smoke -Phase 0.E.3.3  # ~155 chained (skip 0.E.4)
+pwsh -File scripts\swarm.ps1 smoke -Phase 0.E.3.2  # ~140 chained (skip 0.E.3.3 + 0.E.4)
+```
+
+Each `smoke-0.E.<N>.ps1` runs the `<N-1>` baseline first; failures cascade from earliest broken sub-phase.
+
+### 3.5 Operator credential reference
+
+| Asset | Vault KV path | Field | Used by |
+|---|---|---|---|
+| Consul gossip key | `nexus/swarm/consul-gossip-key` | `gossip_key` | Vault Agent template → `/etc/consul.d/10-encrypt.hcl` |
+| Consul mgmt token | `nexus/swarm/consul-bootstrap-token` | `management_token` | Operator + smoke probes |
+| Consul agent token (per host) | `nexus/swarm/agent-tokens/<host>` | `agent_token` | Vault Agent template → `/etc/consul.d/30-acl-token.hcl` + Nomad's `consul.token` |
+| Nomad mgmt token | `nexus/swarm/nomad-bootstrap-token` | `management_token` | Operator + smoke probes |
+| Nomad operator tokens (per host) | `nexus/swarm/nomad-agent-tokens/<host>` | `agent_token` | Operator scripting (NOT consumed by agents — they use mTLS) |
+| Portainer admin pwd | `nexus/portainer/admin-bcrypt` | `bcrypt_hash` (rendered) + `plaintext` (operator-readable) | Portainer CE login |
+| Vault HA Shamir | `~/.nexus/vault-transit-init.json` | `unseal_keys_b64` | vault-transit reboot recovery |
+| Build host root token | `~/.nexus/vault-init.json` | `root_token` | All cross-env terraform applies |

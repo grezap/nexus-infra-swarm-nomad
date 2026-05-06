@@ -196,14 +196,38 @@ Test-Check -Description "$leaderIp : consul operator raft list-peers reports 3 p
 } | Out-Null
 
 # ─── Section 6: Nomad cluster shape ───────────────────────────────────────
+# Post-0.E.3.1, Nomad is HTTPS-only on 4646. Post-0.E.3.2, ACL is enforced
+# (deny mode -- tokenless calls return empty). Resolve mgmt token from
+# Vault KV at nexus/swarm/nomad-bootstrap-token; fall back to tokenless
+# (pre-0.E.3.2 baseline behavior).
+$nomadEnv = "NOMAD_ADDR=https://localhost:4646 NOMAD_CACERT=/etc/ssl/certs/nomad-ca.pem"
+$nomadMgmtToken = ''
+$keysFileNomadE1 = Join-Path $env:USERPROFILE '.nexus/vault-init.json'
+if (Test-Path $keysFileNomadE1) {
+    try {
+        $rootTokenN = (Get-Content $keysFileNomadE1 | ConvertFrom-Json).root_token
+        if ($rootTokenN) {
+            $kvProbeN = @"
+set -euo pipefail
+export VAULT_TOKEN='$rootTokenN'
+VAULT_ADDR=https://127.0.0.1:8200 VAULT_SKIP_VERIFY=true vault kv get -field=management_token -mount=nexus swarm/nomad-bootstrap-token 2>/dev/null || true
+"@
+            $kvProbeNB64 = [Convert]::ToBase64String([System.Text.UTF8Encoding]::new($false).GetBytes(($kvProbeN -replace "`r`n", "`n")))
+            $kvOutN = (ssh @sshOpts "$user@192.168.70.121" "echo '$kvProbeNB64' | base64 -d | bash" 2>&1 | Out-String).Trim()
+            if ($kvOutN -and $kvOutN.Length -ge 36) { $nomadMgmtToken = $kvOutN }
+        }
+    } catch { }
+}
+$nomadTokenEnv = if ($nomadMgmtToken) { "NOMAD_TOKEN='$nomadMgmtToken'" } else { '' }
+
 Write-Section 'Nomad cluster shape (informational; harden in 0.E.3)'
 Test-Check -Description "$leaderIp : nomad server members reports 3 alive servers" -Probe {
-    $out = Invoke-RemoteCommand -Ip $leaderIp -Command "nomad server members 2>&1 | grep -c alive || true"
+    $out = Invoke-RemoteCommand -Ip $leaderIp -Command "$nomadEnv $nomadTokenEnv nomad server members 2>&1 | grep -c alive || true"
     $out -match '^3$'
 } | Out-Null
 
 Test-Check -Description "$leaderIp : nomad node status reports 3 ready clients" -Probe {
-    $out = Invoke-RemoteCommand -Ip $leaderIp -Command "nomad node status 2>&1 | grep -c ready || true"
+    $out = Invoke-RemoteCommand -Ip $leaderIp -Command "$nomadEnv $nomadTokenEnv nomad node status 2>&1 | grep -c ready || true"
     $out -match '^3$'
 } | Out-Null
 
