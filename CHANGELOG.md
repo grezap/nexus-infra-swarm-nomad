@@ -4,7 +4,79 @@ All notable changes to `nexus-infra-swarm-nomad` are documented here. The format
 
 ## [Unreleased]
 
-(Empty — next release accumulates here.)
+## [0.1.1] — 2026-05-08 — "Phase 0.E.4e — TLS full-chain on wire + ingress-mesh forward path"
+
+Closes ADR-0019. Two latent 0.E.4 bugs surfaced when `grezap/nexus-cli`
+v0.1.0 ran `cluster-status` from the build host against the live cluster
+for the first time, and one structural-fragility bug in the apply pattern
+itself. All three land together as 0.E.4e.
+
+### Fixed (cluster-side)
+
+- **TLS full-chain on the wire.** Vault Agent template + post-render
+  split scripts now write `server.crt = leaf || intermediate` (was leaf
+  only). Daemons (Consul:8501, Nomad:4646, Portainer:9443) present the
+  full chain on TLS handshake; off-cluster clients with only the root
+  in their CA bundle no longer hit `X509ChainStatus.PartialChain`.
+  `ca.pem` stays as the intermediate alone — internal mTLS unchanged.
+  Triggers: `consul_tls_v` 6→7, `nomad_tls_v` 4→5, `portainer_tls_v` 1→2.
+
+- **`inet filter forward` chain accept rules** for `docker_gwbridge` +
+  `docker0`. The base `nftables.conf` had `policy drop` with zero rules
+  in the forward chain; Linux runs all FORWARD chains for every
+  forwarded packet, so Docker Swarm's ingress mesh DNAT path
+  (host:9443 → 172.18.0.2:9443) was being dropped despite Docker's
+  own `ip filter FORWARD` accepting. Fix: scoped accept rules on
+  Docker bridges in `inet filter forward` (deny-by-default elsewhere
+  preserved).
+
+### Fixed (apply pattern)
+
+- **Stage1 stdin-pipe pattern in 3 TLS overlays.** The earlier
+  `ssh user@host "echo 'BASE64' | base64 -d | bash"` invocation broke
+  with `bash: -c: line 1: unexpected EOF while looking for matching '`
+  once the embedded base64 grew past ~6KB on Windows ssh.exe. Stage2
+  was migrated to a stdin-pipe pattern in v6; stage1 was never migrated
+  and the v7 split-script edit pushed it over the threshold for the
+  first time. Stage1 now mirrors stage2: pipe LF-normalized plaintext
+  bash to ssh stdin + `bash -s` on the remote with `tr -d '\r'` to
+  strip pwsh-on-Windows pipe CRs.
+
+### Added
+
+- **`role-overlay-nftables-forward.tf`** — SSH-driven hot-fix overlay
+  that idempotently patches `/etc/nftables.conf` on already-deployed
+  swarm-nodes. Marker-based skip; sequential per-node `nft -f` reload
+  + dockerd restart (per ADR-0018).
+- **`scripts/smoke-0.E.4e.ps1`** — chained on `smoke-0.E.4.ps1`. Adds:
+  - **Block A** — `server.crt` on each node has 2 PEM certs (file +
+    wire-chain depth ≥ 2).
+  - **Block B** — `inet filter forward` running ruleset has the
+    docker_gwbridge / docker0 accept rules + ct-state established.
+  - **Block C** — HTTPS reachability **from the build host** with the
+    **stock root-only CA bundle**. Asserts bundle has exactly 1 cert
+    (warns + flags spurious-pass on augmented bundles). The gate
+    0.E.4 lacked.
+  - **Block D** (optional, `-RunCli`) — drives `nexus-cli cluster-status`
+    and asserts overall=green.
+
+### Changed
+
+- **`packer/swarm-node/files/nftables.conf`** — base template's forward
+  chain now ships with the docker_gwbridge accept rules. New clones boot
+  clean (no overlay needed); existing clones get the rules via the
+  nftables_forward overlay.
+- **`scripts/swarm.ps1`** — `0.E.4e` added to `-Phase` ValidateSet.
+- **`docs/handbook.md`** — new §3.6 "Cold rebuild canon" + §3.7
+  "Phase 0.E.4e walkthrough" (apply pattern, rollback, troubleshooting).
+- **§2 phase status table** updated to mark 0.E.4e closed.
+
+### Validated by cold rebuild
+
+`docs/verification/0.E.4e-cold-rebuild.md` records the full
+`destroy → packer build → apply → smoke` cycle ending in ALL GREEN
+with the stock root-only CA bundle on the build host. This proves the
+lab is genuinely rebuildable from the repo + foundation-env state alone.
 
 ## [0.1.0] — 2026-05-07 — "Phase 0.E orchestration tier — Swarm + Consul + Nomad + Portainer CE"
 

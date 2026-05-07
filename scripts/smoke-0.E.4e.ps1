@@ -173,20 +173,27 @@ foreach ($ip in $managerIps) {
 # ─── Block A.4-A.6: wire-chain depth on TLS handshake ─────────────────────
 Write-Section 'Block A -- wire-chain depth on TLS handshake'
 
-foreach ($ip in $allNodeIps) {
+# Consul HTTPS API on workers binds 127.0.0.1 only (Consul client-mode default
+# `client_addr`). Off-cluster Block A probes only the 3 managers' 8501.
+# Workers' on-disk server.crt is already verified above (file check).
+foreach ($ip in $managerIps) {
     $host_ = ($ip -split '\.')[-1]
-    Test-Check "Consul .$host_:8501 sends >=2 chain elements on handshake" {
+    Test-Check "Consul .${host_}:8501 sends >=2 chain elements on handshake" {
         $d = Get-RemoteCertChainDepth -Host_ $ip -Port 8501 -Sni "swarm-manager-1.consul.nexus.lab"
         return $d -ge 2
     } | Out-Null
-    Test-Check "Nomad .$host_:4646 sends >=2 chain elements on handshake" {
+}
+# Nomad's HTTPS API binds all interfaces on every node (manager + worker).
+foreach ($ip in $allNodeIps) {
+    $host_ = ($ip -split '\.')[-1]
+    Test-Check "Nomad .${host_}:4646 sends >=2 chain elements on handshake" {
         $d = Get-RemoteCertChainDepth -Host_ $ip -Port 4646 -Sni "server.global.nomad"
         return $d -ge 2
     } | Out-Null
 }
 foreach ($ip in $managerIps) {
     $host_ = ($ip -split '\.')[-1]
-    Test-Check "Portainer .$host_:9443 sends >=2 chain elements on handshake" {
+    Test-Check "Portainer .${host_}:9443 sends >=2 chain elements on handshake" {
         $d = Get-RemoteCertChainDepth -Host_ $ip -Port 9443 -Sni "portainer.nexus.lab"
         return $d -ge 2
     } | Out-Null
@@ -226,21 +233,64 @@ if ($bundleCount -ne 1) {
     Write-Host "        will pass spuriously. Restore from .bak.* and re-run to validate the cluster-side fix." -ForegroundColor Yellow
 }
 
+# Off-cluster reachability uses a precompiled C# delegate for cert validation.
+# Why not curl: Windows curl uses schannel which doesn't honour IP SANs (only
+# DNS names) -- our lab certs use IP SANs so schannel rejects every probe.
+# Why not a PS scriptblock callback: HttpClient invokes the callback on a
+# thread-pool thread, which has no PS Runspace -- the scriptblock fails with
+# "There is no Runspace available to run scripts in this thread". A static
+# C# delegate has no Runspace dependency. This is the same chain-validation
+# logic nexus-cli's HttpClient factory uses (ADR-0019).
+# Off-cluster TLS validation against the stock bundle. Why not curl: Windows
+# curl uses schannel which doesn't honour IP SANs. Why not HttpClient: its
+# certificate-callback fires on a thread-pool thread which has no PS Runspace.
+# SslStream's callback fires synchronously on the calling thread (Runspace
+# present) -- and we only need to confirm the chain validates, not pull HTTP
+# bodies. So the gate becomes: open a TLS connection to the service, manually
+# build the chain against $rootCerts, return chain.Build() result. If the
+# server presents the full chain (Block A confirms 2 elements on wire) AND
+# the chain anchors at the root in our stock bundle, validation succeeds.
+$script:rootCerts = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2Collection
+$script:rootCerts.ImportFromPemFile($caBundle)
+
+function Test-StockBundleHandshake([string]$Host_, [int]$Port, [string]$Sni) {
+    $tcp = $null; $ssl = $null
+    try {
+        $tcp = [System.Net.Sockets.TcpClient]::new()
+        $tcp.ReceiveTimeout = 5000; $tcp.SendTimeout = 5000
+        $tcp.Connect($Host_, $Port)
+        $script:validated = $false
+        $ssl = [System.Net.Security.SslStream]::new($tcp.GetStream(), $false, {
+            param($s, $cert, $chain, $errs)
+            if ($null -eq $cert) { return $false }
+            $cp = New-Object System.Security.Cryptography.X509Certificates.X509Chain
+            $cp.ChainPolicy.TrustMode = 'CustomRootTrust'
+            $cp.ChainPolicy.RevocationMode = 'NoCheck'
+            $cp.ChainPolicy.CustomTrustStore.AddRange($script:rootCerts)
+            if ($chain) { foreach ($e in $chain.ChainElements) { $cp.ChainPolicy.ExtraStore.Add($e.Certificate) | Out-Null } }
+            $script:validated = $cp.Build($cert)
+            return $script:validated
+        })
+        $ssl.AuthenticateAsClient($Sni)
+        return $script:validated
+    } catch {
+        return $false
+    } finally {
+        if ($ssl) { $ssl.Dispose() }
+        if ($tcp) { $tcp.Dispose() }
+    }
+}
+
 foreach ($ip in $managerIps) {
     $host_ = ($ip -split '\.')[-1]
-    Test-Check "Consul HTTPS GET /v1/status/leader on .$host_:8501 returns 200" {
-        $code = (curl.exe -sS --cacert $caBundle --ssl-no-revoke --connect-timeout 5 -m 8 -o $null -w '%{http_code}' "https://$ip:8501/v1/status/leader" 2>$null)
-        return $code -eq '200'
+    Test-Check "Consul TLS validates against stock bundle on .${host_}:8501" {
+        return Test-StockBundleHandshake -Host_ $ip -Port 8501 -Sni "swarm-manager-1.consul.nexus.lab"
     } | Out-Null
-    Test-Check "Nomad HTTPS GET /v1/status/leader on .$host_:4646 returns 200 or 403" {
-        # Anonymous deny may return 403 (Nomad ACL); both are TLS-handshake-passed.
-        # The gate is "TLS validates with stock bundle", not "endpoint authorized".
-        $code = (curl.exe -sS --cacert $caBundle --ssl-no-revoke --connect-timeout 5 -m 8 -o $null -w '%{http_code}' "https://$ip:4646/v1/status/leader" 2>$null)
-        return $code -in @('200', '403')
+    Test-Check "Nomad TLS validates against stock bundle on .${host_}:4646" {
+        return Test-StockBundleHandshake -Host_ $ip -Port 4646 -Sni "server.global.nomad"
     } | Out-Null
-    Test-Check "Portainer HTTPS GET /api/system/status on .$host_:9443 returns 200" {
-        $code = (curl.exe -sS --cacert $caBundle --ssl-no-revoke --connect-timeout 5 -m 8 -o $null -w '%{http_code}' "https://$ip:9443/api/system/status" 2>$null)
-        return $code -eq '200'
+    Test-Check "Portainer TLS validates against stock bundle on .${host_}:9443" {
+        return Test-StockBundleHandshake -Host_ $ip -Port 9443 -Sni "portainer.nexus.lab"
     } | Out-Null
 }
 

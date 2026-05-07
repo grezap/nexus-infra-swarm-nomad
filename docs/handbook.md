@@ -226,6 +226,25 @@ The lab is engineered to be re-deployable from cold without operator hot-state. 
 # 1. Tear down (~5 min). nexus-gateway is part of the foundation env (NOT torn down here).
 pwsh -File scripts\swarm.ps1 destroy
 
+# 1b. PREREQUISITE for cold rebuild: wipe stale Consul + Nomad bootstrap +
+#     per-host agent tokens from Vault KV. The new cluster's `consul acl
+#     bootstrap` mints a fresh mgmt token; if the old one is still in KV,
+#     consul_acl Stage 3 reuses it, the new cluster doesn't recognize it,
+#     and Stage 5 verification fails with "expected 6 alive, got '0'".
+#     Same shape for nomad_acl. consul-gossip-key is preserved (not
+#     bootstrap state).
+$root = (Get-Content "$HOME\.nexus\vault-init.json" | ConvertFrom-Json).root_token
+$wipe = @"
+export VAULT_TOKEN='$root' VAULT_ADDR=https://127.0.0.1:8200 VAULT_SKIP_VERIFY=true
+vault kv metadata delete -mount=nexus swarm/consul-bootstrap-token
+vault kv metadata delete -mount=nexus swarm/nomad-bootstrap-token
+for h in swarm-manager-1 swarm-manager-2 swarm-manager-3 swarm-worker-1 swarm-worker-2 swarm-worker-3; do
+  vault kv metadata delete -mount=nexus swarm/agent-tokens/`$h
+  vault kv metadata delete -mount=nexus swarm/nomad-agent-tokens/`$h
+done
+"@
+ssh nexusadmin@192.168.70.121 $wipe
+
 # 2. Re-apply from cold (~25-35 min, sequential per-node bring-up + per-overlay apply).
 pwsh -File scripts\swarm.ps1 apply
 
@@ -347,8 +366,11 @@ Get-Depth '192.168.70.111' 9443 'portainer.nexus.lab'                 # expect: 
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
+| `[consul-acl] cluster not converged under deny-mode: expected 6 alive, got '0'` after a cold rebuild | Stale Consul mgmt token in Vault KV from a previous deploy; Stage 3 "idempotent reuse" trusted it; new cluster has different bootstrap state. Same shape applies to `[nomad-acl]` Stage 3. | **Cold-rebuild prerequisite (canon):** before re-applying after a destroy, wipe the affected KV paths via root token: `vault kv metadata delete -mount=nexus swarm/consul-bootstrap-token`, `... swarm/nomad-bootstrap-token`, and the per-host `swarm/agent-tokens/<host>` and `swarm/nomad-agent-tokens/<host>` for all 6 nodes. `consul-gossip-key` is preserved (not bootstrap state). Then re-apply. Tracked for canonical-fix in 0.E.5+ as "validate token against cluster, re-bootstrap on stale". |
+| `bash: -c: line 1: unexpected EOF while looking for matching '` during a TLS overlay's Phase 1 stage1 | Pre-0.E.4e: stage1 used `bash -c 'echo BASE64 \| base64 -d \| bash'`; ssh.exe argv handling on Windows clips ~6KB single-quoted strings. v7's split-script edit pushed stage1 over the threshold. | Fixed in `consul-tls v7` / `nomad-tls v5` / `portainer-tls v2` (commit [`10377af`](https://github.com/grezap/nexus-infra-swarm-nomad/commit/10377af)). Stage1 now mirrors stage2: pipe LF-normalized plaintext to ssh + `bash -s` with `tr -d '\r'` on the remote. |
 | Portainer task fails immediately after step 3 | Container started but dockerd was restarting elsewhere too soon | Wait 60s; rerun `docker service update --force portainer_server` |
 | Consul rolling restart leaves a manager out of raft | Sequential 5s sleep too short on a fragile cluster | Step 4 retry; if persistent, check `consul members` for split-brain and use `consul force-leave` |
 | Wire-chain depth = 1 after step 5 | Vault Agent's pkiCert returned cached cert without re-render (the cert hadn't expired yet) | Manually delete `/etc/nomad.d/tls/bundle.pem` on each manager + `systemctl restart nexus-vault-agent.service`; idempotent re-render fires |
 | Smoke gate Block C says "bundle has N certs (expected 1)" | Operator augmented the bundle as a workaround for the pre-0.E.4e state | Restore from `$HOME\.nexus\vault-ca-bundle.crt.bak.*` and re-run smoke |
+| Smoke gate Block A "Consul .131:8501 sends >=2 chain elements" FAILS for workers | Workers' Consul HTTPS API binds `127.0.0.1` only (Consul client-mode `client_addr` default); off-cluster probes get TCP refused. Not a regression. | Smoke gate v2+ correctly probes managers only for Consul (workers' on-disk server.crt is verified by the file-check in the same block). |
 | `:9443` reachable from manager but not from build host | nftables_forward overlay didn't fire on this node, OR docker hasn't been restarted | `ssh nexusadmin@<ip> 'sudo nft list chain inet filter forward'` should show docker_gwbridge accept; if missing, re-run step 1 with `-target='null_resource.nftables_forward[0]'` |
