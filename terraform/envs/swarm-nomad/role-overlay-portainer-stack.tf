@@ -61,11 +61,11 @@ resource "null_resource" "portainer_stack" {
     swarm_va_ids = sha256(jsonencode([
       for k, v in null_resource.swarm_vault_agent : v.id
     ]))
-    nfs_mount_id        = length(null_resource.portainer_nfs_mount) > 0 ? null_resource.portainer_nfs_mount[0].id : "disabled"
-    tls_id              = length(null_resource.portainer_tls) > 0 ? null_resource.portainer_tls[0].id : "disabled"
-    admin_render_id     = length(null_resource.portainer_admin_render) > 0 ? null_resource.portainer_admin_render[0].id : "disabled"
-    image_version       = var.portainer_image_version
-    portainer_stack_v   = "1" # v1 = original (compose v3.8 with server [1 replica, manager-pin] + agent [global]; bind-mounts NFS data, TLS certs, admin-password file; HTTPS:9443).
+    nfs_mount_id      = length(null_resource.portainer_nfs_mount) > 0 ? null_resource.portainer_nfs_mount[0].id : "disabled"
+    tls_id            = length(null_resource.portainer_tls) > 0 ? null_resource.portainer_tls[0].id : "disabled"
+    admin_render_id   = length(null_resource.portainer_admin_render) > 0 ? null_resource.portainer_admin_render[0].id : "disabled"
+    image_version     = var.portainer_image_version
+    portainer_stack_v = "1" # v1 = original (compose v3.8 with server [1 replica, manager-pin] + agent [global]; bind-mounts NFS data, TLS certs, admin-password file; HTTPS:9443).
   }
 
   depends_on = [null_resource.portainer_nfs_mount, null_resource.portainer_tls, null_resource.portainer_admin_render]

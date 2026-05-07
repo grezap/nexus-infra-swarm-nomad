@@ -41,9 +41,9 @@ resource "null_resource" "portainer_admin_render" {
     swarm_va_ids = sha256(jsonencode([
       for k, v in null_resource.swarm_vault_agent : v.id
     ]))
-    portainer_tls_id    = length(null_resource.portainer_tls) > 0 ? null_resource.portainer_tls[0].id : "disabled"
-    kv_mount_path       = var.vault_kv_mount_path
-    admin_render_v      = "2" # v2 = template body switched from HCL inline-string syntax (`contents = "{{ with secret ... }}"`) to HCL heredoc (`contents = <<EOT ... EOT`). v1 used `@'...'@` PS literal here-string with leftover backtick-quote escapes from the @"..."@ pattern -- result was the file containing literal `\"` (backtick + quote) where HCL expected just `"`. Vault Agent rejected with `error loading "/etc/vault-agent/71-template-portainer-admin.hcl": At 2:65: illegal char`. Heredoc avoids the quoting problem entirely. v1 = original (broken inline-string syntax; all 3 managers crashlooped vault-agent).
+    portainer_tls_id = length(null_resource.portainer_tls) > 0 ? null_resource.portainer_tls[0].id : "disabled"
+    kv_mount_path    = var.vault_kv_mount_path
+    admin_render_v   = "2" # v2 = template body switched from HCL inline-string syntax (`contents = "{{ with secret ... }}"`) to HCL heredoc (`contents = <<EOT ... EOT`). v1 used `@'...'@` PS literal here-string with leftover backtick-quote escapes from the @"..."@ pattern -- result was the file containing literal `\"` (backtick + quote) where HCL expected just `"`. Vault Agent rejected with `error loading "/etc/vault-agent/71-template-portainer-admin.hcl": At 2:65: illegal char`. Heredoc avoids the quoting problem entirely. v1 = original (broken inline-string syntax; all 3 managers crashlooped vault-agent).
   }
 
   depends_on = [null_resource.swarm_vault_agent, null_resource.portainer_tls]

@@ -50,9 +50,9 @@ resource "null_resource" "portainer_nfs_mount" {
   count = var.enable_portainer_nfs_mount ? 1 : 0
 
   triggers = {
-    nfs_server   = var.portainer_nfs_server
-    remote_path  = var.portainer_nfs_remote_path
-    local_mount  = var.portainer_data_local_mount
+    nfs_server  = var.portainer_nfs_server
+    remote_path = var.portainer_nfs_remote_path
+    local_mount = var.portainer_data_local_mount
     swarm_va_ids = sha256(jsonencode([
       for k, v in null_resource.swarm_vault_agent : v.id
     ]))

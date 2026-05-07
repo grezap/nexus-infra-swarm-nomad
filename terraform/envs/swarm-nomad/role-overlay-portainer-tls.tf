@@ -83,8 +83,8 @@ resource "null_resource" "portainer_tls" {
     swarm_va_ids = sha256(jsonencode([
       for k, v in null_resource.swarm_vault_agent : v.id
     ]))
-    pki_role_name    = var.vault_pki_portainer_role_name
-    portainer_tls_v  = "1" # v1 = original (per-manager Vault Agent template renders portainer leaf cert from pki_int/issue/portainer-server; split script writes server.crt + server.key + ca.pem to /etc/portainer/tls/).
+    pki_role_name   = var.vault_pki_portainer_role_name
+    portainer_tls_v = "1" # v1 = original (per-manager Vault Agent template renders portainer leaf cert from pki_int/issue/portainer-server; split script writes server.crt + server.key + ca.pem to /etc/portainer/tls/).
   }
 
   depends_on = [null_resource.swarm_vault_agent, null_resource.nomad_consul_rewire]
