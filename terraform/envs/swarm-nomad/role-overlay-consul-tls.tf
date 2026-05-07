@@ -449,8 +449,14 @@ if ! sudo test -s /etc/consul.d/tls/bundle.pem; then
 fi
 sudo /usr/local/sbin/consul-tls-split.sh
 "@
-        $stage1B64 = [Convert]::ToBase64String([System.Text.UTF8Encoding]::new($false).GetBytes($stage1))
-        $stage1Out = ssh @sshOpts "$sshUser@$vmIp" "echo '$stage1B64' | base64 -d | bash" 2>&1 | Out-String
+        # Pipe plaintext stage1 to ssh stdin + run with `bash -s`. The earlier
+        # `echo 'B64' | base64 -d | bash` pattern fails when the embedded base64
+        # pushes ssh.exe's argv handling past ~6KB on Windows, with the same
+        # "bash: -c: line 1: unexpected EOF while looking for matching '"
+        # symptom that stage2 documented + fixed first. tr strips any CRs that
+        # the pwsh-on-Windows stdout-to-ssh.exe pipe re-injects.
+        $stage1Lf  = $stage1 -replace "`r`n", "`n"
+        $stage1Out = $stage1Lf | ssh @sshOpts "$sshUser@$vmIp" "tr -d '\r' | bash -s" 2>&1 | Out-String
         if ($LASTEXITCODE -ne 0) {
           Write-Host $stage1Out.Trim()
           throw "[consul-tls $${nodeHost}] phase1 (cert render) failed (rc=$LASTEXITCODE)"

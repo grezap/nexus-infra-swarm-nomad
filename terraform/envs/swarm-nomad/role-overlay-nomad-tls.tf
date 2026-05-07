@@ -383,8 +383,11 @@ fi
 # guarantees per-version outputs land regardless of cache state.
 sudo /usr/local/sbin/nomad-tls-split.sh
 "@
-        $stage1B64 = [Convert]::ToBase64String([System.Text.UTF8Encoding]::new($false).GetBytes(($stage1 -replace "`r`n", "`n")))
-        $out = (ssh @sshOpts "$sshUser@$vmIp" "echo '$stage1B64' | base64 -d | bash" 2>&1 | Out-String)
+        # Pipe plaintext stage1 to ssh stdin + run with `bash -s`. Mirrors the
+        # stage2/consul-tls fix: the embedded-base64 pattern fails when ssh.exe's
+        # argv handling clips ~6KB single-quoted strings on Windows.
+        $stage1Lf = $stage1 -replace "`r`n", "`n"
+        $out = ($stage1Lf | ssh @sshOpts "$sshUser@$vmIp" "tr -d '\r' | bash -s" 2>&1 | Out-String)
         if ($LASTEXITCODE -ne 0) {
           return "[$nodeHost] stage1 (cert render) failed (rc=$LASTEXITCODE): $($out.Trim())"
         }
