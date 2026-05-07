@@ -229,17 +229,17 @@ if ($bundleCount -ne 1) {
 foreach ($ip in $managerIps) {
     $host_ = ($ip -split '\.')[-1]
     Test-Check "Consul HTTPS GET /v1/status/leader on .$host_:8501 returns 200" {
-        $code = (curl.exe -sS --cacert $caBundle --connect-timeout 5 -m 8 -o $null -w '%{http_code}' "https://$ip:8501/v1/status/leader" 2>$null)
+        $code = (curl.exe -sS --cacert $caBundle --ssl-no-revoke --connect-timeout 5 -m 8 -o $null -w '%{http_code}' "https://$ip:8501/v1/status/leader" 2>$null)
         return $code -eq '200'
     } | Out-Null
     Test-Check "Nomad HTTPS GET /v1/status/leader on .$host_:4646 returns 200 or 403" {
         # Anonymous deny may return 403 (Nomad ACL); both are TLS-handshake-passed.
         # The gate is "TLS validates with stock bundle", not "endpoint authorized".
-        $code = (curl.exe -sS --cacert $caBundle --connect-timeout 5 -m 8 -o $null -w '%{http_code}' "https://$ip:4646/v1/status/leader" 2>$null)
+        $code = (curl.exe -sS --cacert $caBundle --ssl-no-revoke --connect-timeout 5 -m 8 -o $null -w '%{http_code}' "https://$ip:4646/v1/status/leader" 2>$null)
         return $code -in @('200', '403')
     } | Out-Null
     Test-Check "Portainer HTTPS GET /api/system/status on .$host_:9443 returns 200" {
-        $code = (curl.exe -sS --cacert $caBundle --connect-timeout 5 -m 8 -o $null -w '%{http_code}' "https://$ip:9443/api/system/status" 2>$null)
+        $code = (curl.exe -sS --cacert $caBundle --ssl-no-revoke --connect-timeout 5 -m 8 -o $null -w '%{http_code}' "https://$ip:9443/api/system/status" 2>$null)
         return $code -eq '200'
     } | Out-Null
 }

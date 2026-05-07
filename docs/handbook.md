@@ -319,7 +319,10 @@ $bundle = "$HOME\.nexus\vault-ca-bundle.crt"
 # 2. Off-cluster TLS handshake to each manager's services should succeed.
 foreach ($ip in '192.168.70.111','192.168.70.112','192.168.70.113') {
   foreach ($p in 8501,4646,9443) {
-    $code = curl.exe -sS --cacert $bundle -m 5 -o $null -w '%{http_code}' "https://$ip:$p/$(if ($p -eq 9443) { 'api/system/status' } else { 'v1/status/leader' })"
+    # --ssl-no-revoke: Windows curl uses schannel, which checks CRL by default;
+    # the lab PKI doesn't expose a CRL endpoint reachable from the build host,
+    # so without this flag schannel returns curl exit 60 ("revocation status unknown").
+    $code = curl.exe -sS --cacert $bundle --ssl-no-revoke -m 5 -o $null -w '%{http_code}' "https://$ip:$p/$(if ($p -eq 9443) { 'api/system/status' } else { 'v1/status/leader' })"
     "{0,-16} :{1,-5} -> {2}" -f $ip, $p, $code
   }
 }
