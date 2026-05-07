@@ -97,7 +97,7 @@ resource "null_resource" "nomad_tls" {
     ]))
     consul_acl_id = length(null_resource.consul_acl) > 0 ? null_resource.consul_acl[0].id : "disabled"
     pki_role_name = var.vault_pki_nomad_role_name
-    nomad_tls_v   = "4" # v4 = drop /etc/nomad.d/41-client-servers.hcl on WORKERS only with explicit `client { servers = [...] }` pointing at the 3 manager VMnet10 IPs. v3's parallel big-bang restart fixed manager-side TLS RPC reconvergence (raft leader elected fine), but workers couldn't find ANY server: their Nomad client config relies on `consul { address = "127.0.0.1:8500" }` for server discovery, but HTTP/8500 was hard-cut in 0.E.2.2 -- 0.E.3.3 Nomad-Vault integration will re-wire workers to use HTTPS:8501 with an ACL token, but for 0.E.3.1 we just hardcode the server list to break the discovery dependency. v3 = parallel big-bang restart (sequential rolled the cluster into a no-leader state during gap). v2 = systemd drop-in switches ExecStart from `-config=/etc/nomad.d/nomad.hcl` (single file) to `-config=/etc/nomad.d/` (directory) so 40-tls.hcl is actually loaded. v1 = original (3-stage; mirrors consul-tls v6 with the 4 memorialized lessons).
+    nomad_tls_v   = "5" # v5 (Phase 0.E.4e) = split-script concatenates leaf + intermediate into server.crt so Nomad presents the FULL chain on TLS handshake (off-cluster clients with only root in CA bundle were hitting X509ChainStatus.PartialChain). ca.pem stays as the intermediate alone -- mTLS between agents unchanged. v4 = v4 = drop /etc/nomad.d/41-client-servers.hcl on WORKERS only with explicit `client { servers = [...] }` pointing at the 3 manager VMnet10 IPs. v3's parallel big-bang restart fixed manager-side TLS RPC reconvergence (raft leader elected fine), but workers couldn't find ANY server: their Nomad client config relies on `consul { address = "127.0.0.1:8500" }` for server discovery, but HTTP/8500 was hard-cut in 0.E.2.2 -- 0.E.3.3 Nomad-Vault integration will re-wire workers to use HTTPS:8501 with an ACL token, but for 0.E.3.1 we just hardcode the server list to break the discovery dependency. v3 = parallel big-bang restart (sequential rolled the cluster into a no-leader state during gap). v2 = systemd drop-in switches ExecStart from `-config=/etc/nomad.d/nomad.hcl` (single file) to `-config=/etc/nomad.d/` (directory) so 40-tls.hcl is actually loaded. v1 = original (3-stage; mirrors consul-tls v6 with the 4 memorialized lessons).
   }
 
   depends_on = [null_resource.swarm_vault_agent, null_resource.consul_acl]
@@ -164,9 +164,14 @@ if [ -z "$SERVER_CRT" ] || [ -z "$SERVER_KEY" ] || [ -z "$CA_PEM" ]; then
   exit 1
 fi
 
-install -m 0644 -o root -g nomad "$SERVER_CRT" "$DEST/server.crt"
-install -m 0640 -o root -g nomad "$SERVER_KEY" "$DEST/server.key"
-install -m 0644 -o root -g nomad "$CA_PEM"     "$DEST/ca.pem"
+# v5 (Phase 0.E.4e): concatenate leaf + intermediate into server.crt so the
+# Nomad HTTPS listener presents the FULL chain on TLS handshake. Mirrors the
+# consul-tls v7 fix; ca.pem stays as the intermediate alone.
+cat "$SERVER_CRT" "$CA_PEM" > "$TMP/server-fullchain.crt"
+
+install -m 0644 -o root -g nomad "$TMP/server-fullchain.crt" "$DEST/server.crt"
+install -m 0640 -o root -g nomad "$SERVER_KEY"               "$DEST/server.key"
+install -m 0644 -o root -g nomad "$CA_PEM"                   "$DEST/ca.pem"
 
 # Operator-readable copy. /etc/nomad.d/ is mode 0750 root:nomad so
 # nexusadmin can't traverse without sudo; the world-readable copy at

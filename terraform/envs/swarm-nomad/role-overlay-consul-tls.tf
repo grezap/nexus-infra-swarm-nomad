@@ -100,7 +100,7 @@ resource "null_resource" "consul_tls" {
     # PKI role config (allowed_domains, leaf TTL) pulled from security env --
     # captured here so a security-env knob bump re-issues per-node certs.
     pki_role_name = var.vault_pki_consul_role_name
-    consul_tls_v  = "6" # v6 = (a) systemd drop-in `-http-port=-1` CLI flag override (Consul HCL config-dir merge silently does NOT override the ports.http key from consul.hcl set by firstboot -- it only ADDS new keys; CLI flags trump all config layers so this is the canonical fix), (b) nftables 8501 rule via `nft -f /etc/nftables.conf` (in-place patch /etc/nftables.conf if missing, then atomic ruleset reload -- the v5 `nft add rule` appended AFTER the counter-drop rule, so the 8501 rule was unreachable). v5 = manual split-script invocation at end of stage1 (Vault Agent's pkiCert caches; a restart with an unchanged cert -> no destination write -> no command invocation, so v4's new split-script logic never ran on a node where v3 had already rendered the cert; manual run is idempotent + guarantees per-version outputs land). v4 = /etc/ssl/certs/consul-ca.pem operator copy. v3 = connect off + parallel restart. v2 = grpc_tls=8503. v1 = original.
+    consul_tls_v  = "7" # v7 (Phase 0.E.4e) = split-script concatenates leaf + intermediate into server.crt so Consul presents the FULL chain on TLS handshake (off-cluster clients with only root in CA bundle were hitting X509ChainStatus.PartialChain; diagnosed via nexus-cli v0.1.x live runs from the build host). ca.pem stays as the intermediate alone -- mTLS between agents unchanged. v6 = (a) systemd drop-in `-http-port=-1` CLI flag override (Consul HCL config-dir merge silently does NOT override the ports.http key from consul.hcl set by firstboot -- it only ADDS new keys; CLI flags trump all config layers so this is the canonical fix), (b) nftables 8501 rule via `nft -f /etc/nftables.conf` (in-place patch /etc/nftables.conf if missing, then atomic ruleset reload -- the v5 `nft add rule` appended AFTER the counter-drop rule, so the 8501 rule was unreachable). v5 = manual split-script invocation at end of stage1 (Vault Agent's pkiCert caches; a restart with an unchanged cert -> no destination write -> no command invocation, so v4's new split-script logic never ran on a node where v3 had already rendered the cert; manual run is idempotent + guarantees per-version outputs land). v4 = /etc/ssl/certs/consul-ca.pem operator copy. v3 = connect off + parallel restart. v2 = grpc_tls=8503. v1 = original.
   }
 
   depends_on = [null_resource.swarm_vault_agent, null_resource.consul_gossip_encrypt]
@@ -175,9 +175,17 @@ if [ -z "$SERVER_CRT" ] || [ -z "$SERVER_KEY" ] || [ -z "$CA_PEM" ]; then
   exit 1
 fi
 
-install -m 0644 -o root -g consul "$SERVER_CRT" "$DEST/server.crt"
-install -m 0640 -o root -g consul "$SERVER_KEY" "$DEST/server.key"
-install -m 0644 -o root -g consul "$CA_PEM"     "$DEST/ca.pem"
+# v7 (Phase 0.E.4e): concatenate leaf + intermediate into server.crt so the
+# Consul HTTPS listener presents the FULL chain on TLS handshake. Without
+# this, off-cluster clients (e.g. nexus-cli on the build host) that have
+# only the root in their CA bundle hit X509ChainStatus.PartialChain. ca.pem
+# stays as the intermediate alone -- internal mTLS between agents still
+# verifies via that anchor unchanged.
+cat "$SERVER_CRT" "$CA_PEM" > "$TMP/server-fullchain.crt"
+
+install -m 0644 -o root -g consul "$TMP/server-fullchain.crt" "$DEST/server.crt"
+install -m 0640 -o root -g consul "$SERVER_KEY"               "$DEST/server.key"
+install -m 0644 -o root -g consul "$CA_PEM"                   "$DEST/ca.pem"
 
 # Operator-accessible copy of the CA bundle. /etc/consul.d/ is mode
 # 0750 root:consul (set by firstboot's Ansible) -- protects 10-encrypt.hcl

@@ -84,7 +84,7 @@ resource "null_resource" "portainer_tls" {
       for k, v in null_resource.swarm_vault_agent : v.id
     ]))
     pki_role_name   = var.vault_pki_portainer_role_name
-    portainer_tls_v = "1" # v1 = original (per-manager Vault Agent template renders portainer leaf cert from pki_int/issue/portainer-server; split script writes server.crt + server.key + ca.pem to /etc/portainer/tls/).
+    portainer_tls_v = "2" # v2 (Phase 0.E.4e) = split-script concatenates leaf + intermediate into server.crt so Portainer presents the FULL chain on TLS handshake (off-cluster clients with only root in CA bundle were hitting X509ChainStatus.PartialChain). ca.pem stays as the intermediate alone. v1 = original (per-manager Vault Agent template renders portainer leaf cert from pki_int/issue/portainer-server; split script writes server.crt + server.key + ca.pem to /etc/portainer/tls/).
   }
 
   depends_on = [null_resource.swarm_vault_agent, null_resource.nomad_consul_rewire]
@@ -149,9 +149,14 @@ if [ -z "$SERVER_CRT" ] || [ -z "$SERVER_KEY" ] || [ -z "$CA_PEM" ]; then
   exit 1
 fi
 
-install -m 0644 -o root -g root "$SERVER_CRT" "$DEST/server.crt"
-install -m 0640 -o root -g root "$SERVER_KEY" "$DEST/server.key"
-install -m 0644 -o root -g root "$CA_PEM"     "$DEST/ca.pem"
+# v2 (Phase 0.E.4e): concatenate leaf + intermediate into server.crt so the
+# Portainer HTTPS listener presents the FULL chain on TLS handshake. Mirrors
+# the consul-tls v7 / nomad-tls v5 fix; ca.pem stays as the intermediate alone.
+cat "$SERVER_CRT" "$CA_PEM" > "$TMP/server-fullchain.crt"
+
+install -m 0644 -o root -g root "$TMP/server-fullchain.crt" "$DEST/server.crt"
+install -m 0640 -o root -g root "$SERVER_KEY"               "$DEST/server.key"
+install -m 0644 -o root -g root "$CA_PEM"                   "$DEST/ca.pem"
 
 echo "[portainer-tls-split] $(date -u +%FT%TZ) bundle split: server.crt + server.key + ca.pem"
 '@

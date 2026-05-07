@@ -113,7 +113,8 @@ Gateway dhcp-host reservations stay live (they belong to foundation env). To dro
 | 0.E.2 | Consul harden (gossip encrypt + TLS + ACL deny-mode) | ✅ closed |
 | 0.E.3 | Nomad harden (TLS + ACL + → Consul HTTPS + Vault integration) | ✅ closed |
 | 0.E.4 | Portainer CE clustered Swarm service | ✅ closed |
-| 0.E.5 | Close-out canon batch (MASTER-PLAN + ADRs + vms.yaml + glossary) | 🟡 next |
+| 0.E.4e | TLS full-chain on wire + `inet filter forward` accept rules | 🟡 in-flight (this session) |
+| 0.E.5 | Close-out canon batch (MASTER-PLAN + ADRs + vms.yaml + glossary) | ⚪ next |
 
 Exit gate cumulative: `docker node ls` = 6, `nomad server members` = 3, `consul members` = 6, Portainer UI reachable at `https://portainer.nexus.lab:9443` with CA-validated TLS. ~180-check chained smoke gate (`scripts/smoke-0.E.4.ps1`) ALL GREEN.
 
@@ -216,3 +217,135 @@ Each `smoke-0.E.<N>.ps1` runs the `<N-1>` baseline first; failures cascade from 
 | Portainer admin pwd | `nexus/portainer/admin-bcrypt` | `bcrypt_hash` (rendered) + `plaintext` (operator-readable) | Portainer CE login |
 | Vault HA Shamir | `~/.nexus/vault-transit-init.json` | `unseal_keys_b64` | vault-transit reboot recovery |
 | Build host root token | `~/.nexus/vault-init.json` | `root_token` | All cross-env terraform applies |
+
+### 3.6 Cold rebuild — destroy → apply → smoke (canon)
+
+The lab is engineered to be re-deployable from cold without operator hot-state. Once 0.E.4e has landed, the canonical full-rebuild path is:
+
+```pwsh
+# 1. Tear down (~5 min). nexus-gateway is part of the foundation env (NOT torn down here).
+pwsh -File scripts\swarm.ps1 destroy
+
+# 2. Re-apply from cold (~25-35 min, sequential per-node bring-up + per-overlay apply).
+pwsh -File scripts\swarm.ps1 apply
+
+# 3. Smoke gate (~5 min). Chains 0.E.1 -> 0.E.2.x -> 0.E.3.x -> 0.E.4 -> 0.E.4e.
+pwsh -File scripts\swarm.ps1 smoke -Phase 0.E.4e
+
+# 4. End-to-end with the operator CLI.
+$env:VAULT_ADDR   = 'https://192.168.70.121:8200'
+$env:VAULT_CACERT = "$HOME\.nexus\vault-ca-bundle.crt"   # STOCK root-only
+vault login -method=ldap username=nexusadmin
+$env:VAULT_TOKEN  = vault print token
+F:\..\nexus-cli\artifacts\win-x64\nexus.exe cluster-status
+# Expect: GREEN across Consul + Nomad + Portainer.
+```
+
+There must be **zero manual steps** between (3) and (4) — no `Add-Content $caBundle ...`, no `--insecure`, no `NEXUS_*_ADDR` overrides for cluster reachability. If any are needed, that's a regression in the cluster build, not an operator workaround.
+
+### 3.7 Phase 0.E.4e — TLS full-chain on wire + ingress-mesh forward path
+
+> Scope: ADR-0019. Two architectural fixes that close the gap between "smoke gate green from inside the cluster" and "build-host operator workflow works against the cluster's stock CA bundle."
+
+**Why this phase exists:** Phase 0.E.4 closed with smoke probes that ran *inside* the cluster, against `--cacert /etc/portainer/tls/ca.pem` (the manager's local intermediate file). That gate didn't catch (1) leaf-only on the wire, and (2) `inet filter forward` policy=drop with no rules. The first off-cluster client (`grezap/nexus-cli` v0.1.0) hit both immediately.
+
+**Scope of changes:**
+
+| File | Change |
+|---|---|
+| `terraform/envs/swarm-nomad/role-overlay-consul-tls.tf` | split-script: server.crt = leaf+intermediate. `consul_tls_v` 6→7. |
+| `terraform/envs/swarm-nomad/role-overlay-nomad-tls.tf` | split-script: server.crt = leaf+intermediate. `nomad_tls_v` 4→5. |
+| `terraform/envs/swarm-nomad/role-overlay-portainer-tls.tf` | split-script: server.crt = leaf+intermediate. `portainer_tls_v` 1→2. |
+| `terraform/envs/swarm-nomad/role-overlay-nftables-forward.tf` | NEW. SSH-driven hot-fix: append docker_gwbridge / docker0 accept rules to `inet filter forward` on each node. |
+| `packer/swarm-node/files/nftables.conf` | base template: forward chain populated with the accept rules. Future clones boot clean. |
+| `scripts/smoke-0.E.4e.ps1` | NEW. Chained on smoke-0.E.4.ps1; adds wire-chain depth, off-cluster reachability, and forward-rule probes. |
+| `scripts/swarm.ps1` | `0.E.4e` added to ValidateSet for `-Phase`. |
+
+**Apply pattern (the only one that survives the 5s-cascade pitfall):**
+
+> Pre-condition: swarm 6/6 nodes Ready, leader healthy, Portainer 1/1. Validate via `docker node ls` + `docker service ls` from any manager. **Abort** if any NACK — cluster fragility from a previous churn cycle will cascade-kill tasks during the apply.
+
+```pwsh
+cd terraform/envs/swarm-nomad
+
+# Step 1: nftables forward fix on running cluster (additive; one docker restart per node).
+#   Per-node sequential with 30s settle (longer than 0.E.4d's 5s -- intentional).
+terraform apply -auto-approve -target='null_resource.nftables_forward[0]'
+
+# Step 2: portainer_tls re-render. Vault Agent picks up the new template,
+#   writes new bundle.pem, split-script writes leaf+intermediate to server.crt.
+#   Container hasn't been restarted yet -- it's still serving the old leaf-only cert.
+terraform apply -auto-approve -target='null_resource.portainer_tls[0]'
+
+# Step 3: force a single Portainer service update so the container restarts and
+#   picks up the new server.crt via its bind-mount.
+ssh nexusadmin@192.168.70.111 'docker service update --force --detach=false portainer_server'
+
+# Step 4: consul_tls re-render (sequential per-manager rolling restart per overlay's logic).
+terraform apply -auto-approve -target='null_resource.consul_tls[0]'
+
+# Step 5: nomad_tls re-render (parallel big-bang restart per
+#   feedback_nomad_tls_rolling_restart_must_be_parallel.md -- TLS wire-format flips
+#   are the one case where parallel is correct).
+terraform apply -auto-approve -target='null_resource.nomad_tls[0]'
+
+# Step 6: smoke gate.
+pwsh -File scripts\smoke-0.E.4e.ps1 -RunCli `
+     -NexusCliPath "F:\..\nexus-cli\artifacts\win-x64\nexus.exe"
+```
+
+**Expected output between steps:** each `terraform apply -target` produces a per-node "rendering" / "split / restart" log line, then "OK" per node. The `-target` flag suppresses cascade replacement of downstream resources (consul_acl, nomad_vault_integration, portainer_admin_render, portainer_stack); a future `terraform apply` without `-target` will reconcile that drift.
+
+**Rollback procedure:** every overlay has a destroy provisioner that reverts via `.bak.*` backups + service restart:
+
+```pwsh
+# Targeted rollback (per overlay) -- restores /etc/nftables.conf or server.crt etc.
+terraform destroy -auto-approve -target='null_resource.nftables_forward[0]'
+terraform destroy -auto-approve -target='null_resource.portainer_tls[0]'   # tears down portainer_stack via cascade
+terraform destroy -auto-approve -target='null_resource.consul_tls[0]'
+terraform destroy -auto-approve -target='null_resource.nomad_tls[0]'
+
+# Per-overlay state recovery (if the destroy provisioner fails mid-flight):
+ssh nexusadmin@<node> 'sudo cp /etc/nftables.conf.bak.nft-forward /etc/nftables.conf && sudo nft -f /etc/nftables.conf && sudo systemctl restart docker'
+```
+
+**Verification (Block C of smoke-0.E.4e.ps1, run by hand for fast feedback):**
+
+```pwsh
+# 1. Stock CA bundle should have exactly 1 cert (root only).
+$bundle = "$HOME\.nexus\vault-ca-bundle.crt"
+(Select-String $bundle 'BEGIN CERTIFICATE' -SimpleMatch).Count   # expect: 1
+
+# 2. Off-cluster TLS handshake to each manager's services should succeed.
+foreach ($ip in '192.168.70.111','192.168.70.112','192.168.70.113') {
+  foreach ($p in 8501,4646,9443) {
+    $code = curl.exe -sS --cacert $bundle -m 5 -o $null -w '%{http_code}' "https://$ip:$p/$(if ($p -eq 9443) { 'api/system/status' } else { 'v1/status/leader' })"
+    "{0,-16} :{1,-5} -> {2}" -f $ip, $p, $code
+  }
+}
+# Expect: 8501 -> 200, 4646 -> 200 or 403 (Nomad anon-deny is fine; gate is TLS validates),
+#         9443 -> 200. Anything else is a regression.
+
+# 3. Wire-chain depth at one of each.
+function Get-Depth($ip,$p,$sni) {
+  $tcp = [System.Net.Sockets.TcpClient]::new($ip,$p)
+  $script:d = 0
+  $ssl = [System.Net.Security.SslStream]::new($tcp.GetStream(),$false,{ param($s,$c,$ch,$e) $script:d=$ch.ChainElements.Count; $true })
+  $ssl.AuthenticateAsClient($sni)
+  $ssl.Dispose(); $tcp.Dispose()
+  return $script:d
+}
+Get-Depth '192.168.70.111' 8501 'swarm-manager-1.consul.nexus.lab'   # expect: 2
+Get-Depth '192.168.70.111' 4646 'server.global.nomad'                 # expect: 2
+Get-Depth '192.168.70.111' 9443 'portainer.nexus.lab'                 # expect: 2
+```
+
+**Common failure modes during apply:**
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| Portainer task fails immediately after step 3 | Container started but dockerd was restarting elsewhere too soon | Wait 60s; rerun `docker service update --force portainer_server` |
+| Consul rolling restart leaves a manager out of raft | Sequential 5s sleep too short on a fragile cluster | Step 4 retry; if persistent, check `consul members` for split-brain and use `consul force-leave` |
+| Wire-chain depth = 1 after step 5 | Vault Agent's pkiCert returned cached cert without re-render (the cert hadn't expired yet) | Manually delete `/etc/nomad.d/tls/bundle.pem` on each manager + `systemctl restart nexus-vault-agent.service`; idempotent re-render fires |
+| Smoke gate Block C says "bundle has N certs (expected 1)" | Operator augmented the bundle as a workaround for the pre-0.E.4e state | Restore from `$HOME\.nexus\vault-ca-bundle.crt.bak.*` and re-run smoke |
+| `:9443` reachable from manager but not from build host | nftables_forward overlay didn't fire on this node, OR docker hasn't been restarted | `ssh nexusadmin@<ip> 'sudo nft list chain inet filter forward'` should show docker_gwbridge accept; if missing, re-run step 1 with `-target='null_resource.nftables_forward[0]'` |
