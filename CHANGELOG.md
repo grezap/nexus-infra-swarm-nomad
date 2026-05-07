@@ -4,6 +4,59 @@ All notable changes to `nexus-infra-swarm-nomad` are documented here. The format
 
 ## [Unreleased]
 
+(Empty — next release accumulates here.)
+
+## [0.1.0] — 2026-05-07 — "Phase 0.E orchestration tier — Swarm + Consul + Nomad + Portainer CE"
+
+First tagged release of `nexus-infra-swarm-nomad`. Closes Phase 0.E in
+the [NexusPlatform MASTER-PLAN](https://github.com/grezap/nexus-platform-plan/blob/main/MASTER-PLAN.md#4-build-phases) (Tier-2 orchestration). All 4 sub-phases
+landed:
+
+- **0.E.1** — `swarm-node` Packer template + Terraform clones for the
+  6-node 3+3 Docker Swarm (3 managers + 3 workers); dnsmasq dhcp-host
+  pinning; cluster bring-up.
+- **0.E.2** — Consul harden across 3 sub-sub-phases: gossip encryption
+  (0.E.2.1) → mutual TLS for RPC + Raft + HTTPS:8501 hard-cut from
+  HTTP:8500 (0.E.2.2) → ACL `default_policy=deny` cluster-wide with
+  mgmt token in Vault KV + 6 per-host agent tokens (0.E.2.3).
+- **0.E.3** — Nomad harden + Vault integration across 4 sub-sub-phases:
+  TLS with `verify_server_hostname=true` (0.E.3.1) → ACL `enabled=true`
+  with mgmt token in Vault KV + 6 per-host operator tokens; agents
+  authenticate inter-RPC via mTLS cert SAN (0.E.3.2) → Nomad → Consul
+  HTTPS rewire (0.E.3.3a) → Nomad-Vault integration via `nomad-cluster`
+  periodic-token role period=72h (0.E.3.3b).
+- **0.E.4** — Portainer CE clustered Swarm service across 4 sub-sub-
+  phases: NFSv4 from gateway for shared `/data` (0.E.4a) → per-manager
+  TLS leaf cert from `pki_int/issue/portainer-server` (0.E.4b) →
+  dnsmasq `portainer.nexus.lab` multi-A round-robin (0.E.4c) →
+  bcrypt admin password sticky seed + per-manager render + `docker
+  stack deploy` with manager-pinned server (1 replica) + global agent
+  (6 tasks) + canonical nftables firewall overlay opening 9443/8000
+  with sequential dockerd restart (0.E.4d).
+
+**Smoke gate**: ~180 chained probes in `scripts/smoke-0.E.4.ps1` (chains
+0.E.3.3 → 0.E.3.2 → 0.E.3.1 → 0.E.2.3 → 0.E.2.2 → 0.E.2.1 → 0.E.1).
+ALL GREEN at tag time.
+
+**Operator UI**: `https://portainer.nexus.lab:9443`. Admin credentials:
+`vault kv get -field=plaintext -mount=nexus portainer/admin-bcrypt`.
+
+**Architectural decisions** memorialized in
+[`nexus-platform-plan/docs/adr/`](https://github.com/grezap/nexus-platform-plan/tree/main/docs/adr):
+ADR-0016 (Nomad-Vault legacy periodic-token vs. Workload Identity),
+ADR-0017 (Portainer CE single-replica + NFS-via-gateway), ADR-0018
+(nftables flush-ruleset + Docker iptables-nft conflict resolution).
+
+**Lessons memorialized** in the session-memory feedback library:
+`feedback_systemd_runtime_directory_tmpfs.md`,
+`feedback_nomad_consul_address_scheme_less.md`,
+`feedback_nfsv4_fsid0_pseudo_root.md`,
+`feedback_vault_agent_template_hcl_heredoc.md`,
+`feedback_nftables_flush_ruleset_wipes_docker.md`, plus per-overlay
+trigger-comment iteration trails.
+
+Detailed per-sub-phase change log below.
+
 ### Phase 0.E.4 — Portainer CE clustered Swarm service (closed 2026-05-07)
 
 **Sub-phase 0.E.4a — NFS server on gateway + per-manager mount**
