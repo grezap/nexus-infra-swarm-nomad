@@ -4,6 +4,47 @@ All notable changes to `nexus-infra-swarm-nomad` are documented here. The format
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-05-08 — "Phase 0.E orchestration tier — fully closed"
+
+Closes Phase 0.E in the [NexusPlatform MASTER-PLAN](https://github.com/grezap/nexus-platform-plan/blob/main/MASTER-PLAN.md#4-build-phases) (Tier-2 orchestration). All 6 sub-phases delivered, documented, and proven end-to-end via cold-rebuild canon.
+
+This release is **0.E.5 close-out canon batch only** — no cluster-affecting changes. All artefacts already at v0.1.1 are unchanged on disk; v0.2.0 is the marker that Phase 0.E is sealed and the lab can be rebuilt at any time without operator hot-state.
+
+### Closed sub-phases summary
+
+| Sub-phase | Scope | Tag |
+|---|---|---|
+| 0.E.1 | `swarm-node` Packer template + Terraform clones for 6 nodes; `docker swarm init` + join | v0.1.0 |
+| 0.E.2.1 | Consul gossip encryption (Vault Agent renders `10-encrypt.hcl`; rolling restart converges keyring) | v0.1.0 |
+| 0.E.2.2 | Consul TLS — mTLS RPC + raft + HTTPS API on 8501; HTTP/8500 hard-cut via systemd drop-in | v0.1.0 |
+| 0.E.2.3 | Consul ACL — transition-mode bootstrap (allow → deny) + 6 per-host agent tokens via Vault Agent | v0.1.0 |
+| 0.E.3.1 | Nomad TLS — mTLS RPC + raft + HTTPS API on 4646; `verify_server_hostname=true` | v0.1.0 |
+| 0.E.3.2 | Nomad ACL — `enabled=true` cluster-wide; mgmt token in Vault KV; 6 per-host operator tokens | v0.1.0 |
+| 0.E.3.3a | Nomad → Consul HTTPS rewire (`address=127.0.0.1:8501 + ssl=true`) | v0.1.0 |
+| 0.E.3.3b | Nomad-Vault integration via `nomad-cluster` periodic-token role (period=72h) | v0.1.0 |
+| 0.E.4 | Portainer CE clustered Swarm service: NFS-on-gateway + per-manager TLS + dnsmasq round-robin DNS + sticky-seeded admin password + Docker stack with manager-pinned server (1) + global agent (6) | v0.1.0 |
+| 0.E.4e | Cold-rebuild gate + 3 structural fixes: TLS full-chain on wire (consul_tls v7 / nomad_tls v5 / portainer_tls v2); `inet filter forward` accept rules; stage1 stdin-pipe pattern. Off-cluster reachability with stock root-only CA bundle proven end-to-end. | v0.1.1 |
+| 0.E.5 | **This release.** Close-out canon batch — MASTER-PLAN sub-phase rows finalized; vms.yaml ratified; glossary extended; ADRs 0011-0019; handbook walkthrough + cold-rebuild canon + 0.E.4e walkthrough + 5 operator runbooks; verification artefacts. | **v0.2.0** |
+
+### Cold-rebuild canon
+
+The lab survives `terraform destroy` → `packer build` (swarm-node template) →
+`terraform apply` → smoke-0.E.4e ALL GREEN ending in
+[`docs/verification/0.E.4e-cold-rebuild.md`](./docs/verification/0.E.4e-cold-rebuild.md) — with the stock root-only CA bundle on the build host.
+
+Single operator-runbook prerequisite between cold rebuilds: wipe stale Consul + Nomad bootstrap tokens from Vault KV. Documented in handbook §3.6. Canonical self-validating fix tracked for 0.E.6+ as a stretch enhancement.
+
+### Tooling + observability artefacts shipped during Phase 0.E
+
+| Artefact | Lives in |
+|---|---|
+| Operator wrapper `scripts/swarm.ps1` (apply / destroy / smoke / cycle / plan / validate) | this repo |
+| Smoke gates `scripts/smoke-0.E.{1,2.1,2.2,2.3,3.1,3.2,3.3,4,4e}.ps1` (each chained on the prior) | this repo |
+| Vault Agent overlays (per-node consul-server / nomad-server / portainer-server cert render via `pki_int/issue/<role>` + post-render bundle split) | this repo |
+| ADRs 0011-0019 (Vault HA + PKI + LDAPS + KV creds + Transit + Nomad-Vault + Portainer-NFS + nftables-Docker conflict + TLS full-chain) | `nexus-platform-plan/docs/adr/` |
+| Handbook §1-§3 + §3.6 cold-rebuild canon + §3.7 0.E.4e walkthrough + §3.1-§3.5 operator runbooks (Portainer admin, Vault HA reboot, NFS troubleshooting, smoke gate cheat sheet, credential reference) | this repo |
+| Verification: `docs/verification/0.E.4e-cold-rebuild.md` | this repo |
+
 ## [0.1.1] — 2026-05-08 — "Phase 0.E.4e — TLS full-chain on wire + ingress-mesh forward path"
 
 Closes ADR-0019. Two latent 0.E.4 bugs surfaced when `grezap/nexus-cli`

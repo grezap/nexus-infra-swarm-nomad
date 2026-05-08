@@ -4,7 +4,8 @@
 [![Terraform](https://img.shields.io/badge/Terraform-1.9+-purple)](https://www.terraform.io/)
 [![License](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
 [![Blueprint](https://img.shields.io/badge/blueprint-nexus--platform--plan%20v0.1.3-orange)](https://github.com/grezap/nexus-platform-plan)
-[![Phase](https://img.shields.io/badge/phase-0.E.4%20closed%20%E2%80%A2%200.E.5%20canon%20batch%20next-brightgreen)](./CHANGELOG.md)
+[![Phase](https://img.shields.io/badge/phase-0.E%20fully%20closed%20%E2%80%A2%20cold--rebuildable-brightgreen)](./CHANGELOG.md)
+[![Release](https://img.shields.io/badge/release-v0.2.0-blue)](https://github.com/grezap/nexus-infra-swarm-nomad/releases/tag/v0.2.0)
 
 Tier-2 orchestration for the **NexusPlatform 66-VM lab** — a 3+3 Docker Swarm cluster with co-located Nomad servers + Consul servers on the managers and Nomad/Consul clients on the workers, plus Portainer EE deployed as a clustered Swarm service. Sits on top of the [`nexus-infra-vmware`](https://github.com/grezap/nexus-infra-vmware) foundation (Vault, AD, gateway).
 

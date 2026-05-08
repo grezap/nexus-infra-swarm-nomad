@@ -113,8 +113,8 @@ Gateway dhcp-host reservations stay live (they belong to foundation env). To dro
 | 0.E.2 | Consul harden (gossip encrypt + TLS + ACL deny-mode) | ✅ closed |
 | 0.E.3 | Nomad harden (TLS + ACL + → Consul HTTPS + Vault integration) | ✅ closed |
 | 0.E.4 | Portainer CE clustered Swarm service | ✅ closed |
-| 0.E.4e | TLS full-chain on wire + `inet filter forward` accept rules | 🟡 in-flight (this session) |
-| 0.E.5 | Close-out canon batch (MASTER-PLAN + ADRs + vms.yaml + glossary) | ⚪ next |
+| 0.E.4e | TLS full-chain on wire + `inet filter forward` accept rules + stage1 stdin-pipe; cold-rebuild proven end-to-end | ✅ closed (`v0.1.1`, 2026-05-08) |
+| 0.E.5 | Close-out canon batch (MASTER-PLAN sub-phase rows + ADRs 0011–0019 + vms.yaml + glossary + handbook + verification artefacts) | ✅ closed (`v0.2.0`, 2026-05-08) — **Phase 0.E complete** |
 
 Exit gate cumulative: `docker node ls` = 6, `nomad server members` = 3, `consul members` = 6, Portainer UI reachable at `https://portainer.nexus.lab:9443` with CA-validated TLS. ~180-check chained smoke gate (`scripts/smoke-0.E.4.ps1`) ALL GREEN.
 
