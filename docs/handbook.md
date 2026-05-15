@@ -15,7 +15,21 @@ Operator runbook for Phase 0.E (Tier-2 orchestration). Mirrors the structure of 
 
   If absent, run `pwsh -File ../nexus-infra-vmware/scripts/foundation.ps1 apply` from the parent repo first.
 
-## §1 Phase 0.E.1 — 3+3 Swarm cluster bring-up
+## §1 Phase 0.E — full tier bring-up (0.E.1 through 0.E.4e)
+
+A single `pwsh -File scripts\swarm.ps1 apply` brings up **the entire Phase 0.E
+tier** — not just the 0.E.1 swarm cluster, but every overlay through 0.E.4e:
+
+- **0.E.1** — 3+3 Swarm cluster bring-up (clones + firstboot + `docker swarm init/join`)
+- **0.E.2.1-0.E.2.3** — Consul harden: gossip encryption + TLS + ACL deny-mode
+- **0.E.3.1-0.E.3.3** — Nomad harden: TLS + ACL + Nomad → Consul HTTPS rewire + Nomad-Vault integration
+- **0.E.4 + 0.E.4a-d** — Portainer CE clustered Swarm service (NFS-via-gateway + TLS + DNS + bcrypt admin from sticky Vault KV + stack deploy)
+- **0.E.4e** — cold-rebuild gate + 3 structural fixes (TLS full-chain on the wire · `inet filter forward` accept rules · stage1 stdin-pipe pattern in the 3 TLS overlays)
+
+The §1.x sub-sections below describe the operator-level commands; the per-sub-phase
+implementation detail (what each overlay actually does, what state lands where) is
+in `docs/verification/` and in the per-overlay file headers under
+`terraform/envs/swarm-nomad/role-overlay-*.tf`.
 
 ### 1.1 Build the `swarm-node` Packer template
 
@@ -37,7 +51,10 @@ cd ..\..   # back to repo root
 pwsh -File scripts\swarm.ps1 apply
 ```
 
-Apply flow:
+This single command brings up the **full Phase 0.E tier** (every sub-phase, in
+dependency order). Apply flow:
+
+**0.E.1 — 3+3 Swarm cluster bring-up:**
 1. Six `vmrun clone` calls (one per VM, parallelizable but Terraform serializes by default).
 2. `configure-vm-nic.ps1` writes `ethernet0` (VMnet11) + `ethernet1` (VMnet10) for each clone.
 3. `vmrun start ... nogui` powers each on.
@@ -56,9 +73,34 @@ Apply flow:
    - Captures manager + worker join tokens
    - `docker swarm join --advertise-addr <self-vmnet10> --token <manager-T> 192.168.10.111:2377` on mgr-2/3
    - `docker swarm join --advertise-addr <self-vmnet10> --token <worker-T>  192.168.10.111:2377` on wrk-1/2/3
-7. Final assertion: `docker node ls --format '{{.ID}}' | wc -l` returns `6`.
+7. `docker node ls` reports 6.
 
-Total wall-clock for a fresh apply (post-Packer-build): ~10-15 min.
+**0.E.2 — Consul harden** (`role-overlay-swarm-vault-agents.tf` + `role-overlay-consul-{gossip,tls,acl}.tf`):
+8. Per-node `nexus-vault-agent.service` installed (AppRole authenticated to vault-1 via build-host sidecars).
+9. **0.E.2.1** — Consul gossip key rendered from `nexus/swarm/consul-gossip-key` → `/etc/consul.d/10-encrypt.hcl`; sequential rolling consul restart → keyring converges `[6/6]`.
+10. **0.E.2.2** — per-node Consul TLS leaf from `pki_int/issue/consul-server`; mTLS for RPC + Raft, server-only TLS for HTTPS API on `:8501`; plain HTTP `:8500` hard-cut via systemd drop-in.
+11. **0.E.2.3** — Consul ACL bootstrap (allow → deny transition), mgmt token persisted to `nexus/swarm/consul-bootstrap-token`, 6 per-host agent tokens, anonymous HTTPS `/v1/agent/self` returns `403`.
+
+**0.E.3 — Nomad harden** (`role-overlay-nomad-{tls,acl,consul-rewire,vault}.tf`):
+12. **0.E.3.1** — per-node Nomad TLS leaf from `pki_int/issue/nomad-server`; mTLS for RPC + raft + HTTPS API on `:4646`; parallel big-bang restart (a TLS wire-format flip cannot be sequential).
+13. **0.E.3.2** — Nomad ACL bootstrap, mgmt token persisted to `nexus/swarm/nomad-bootstrap-token`, shared `nomad-agent` policy + 6 per-host operator tokens.
+14. **0.E.3.3a** — Nomad → Consul HTTPS rewire: Vault Agent renders Consul agent token; legacy `consul { address = "127.0.0.1:8500" }` sed-removed; sequential rolling restart.
+15. **0.E.3.3b** — Nomad-Vault integration: per-manager periodic token minted via `vault token create -role=nomad-cluster`; `vault {}` stanza loaded.
+
+**0.E.4 — Portainer CE clustered Swarm service** (`role-overlay-portainer-{nfs,tls,dns,admin,stack}.tf`):
+16. **0.E.4a** — NFSv4 `/srv/nfs/portainer-data` exported from `nexus-gateway` with `fsid=0`; per-manager mount at `/var/lib/portainer-data`.
+17. **0.E.4b** — `pki_int/roles/portainer-server` (CN `portainer.nexus.lab` + per-host IP SANs); per-manager Vault Agent renders `/etc/portainer/tls/{server.crt,server.key,ca.pem}`.
+18. **0.E.4c** — dnsmasq `host-record=portainer.nexus.lab,IP1,IP2,IP3` (multi-A round-robin).
+19. **0.E.4d** — sticky-seeded `nexus/portainer/admin-bcrypt` (plaintext + bcrypt cost=10); `docker stack deploy portainer-stack.yml` (server 1 replica manager-pinned + agent global × 6).
+
+**0.E.4e — cold-rebuild gate + 3 structural fixes** (`role-overlay-nftables-forward.tf` + 3 split-script updates):
+20. `inet filter forward` accept rules for `docker_gwbridge`/`docker0` (ingress mesh DNAT path).
+21. Consul + Nomad + Portainer split-scripts emit `server.crt = leaf + intermediate` (full chain on the wire).
+22. Stage1 stdin-pipe pattern in the 3 TLS overlays (pre-fix argv cliff on Windows ssh.exe).
+
+Final assertion: `docker node ls` = 6, `consul members` = 6, `nomad server members` = 3, `https://portainer.nexus.lab:9443/api/system/status` returns 200 with TLS chain validating against the build host's stock root-only CA bundle.
+
+Total wall-clock for a fresh apply (post-Packer-build): ~25-35 min.
 
 ### 1.3 Verify the exit gate
 
