@@ -10,6 +10,13 @@ on:
 permissions:
   contents: read
 
+# Force Node 24 runtime for every JS action regardless of pinned version.
+# Node 20 is deprecated on GitHub Actions runners as of 2026-06-02; this
+# env opts in now. Becomes a no-op once Node 24 is the runner default --
+# can be removed then.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   packer:
     name: Packer validate (${{ matrix.template }})
