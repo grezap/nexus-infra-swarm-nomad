@@ -260,11 +260,29 @@ $vaultEnvBase vault kv get -field=management_token -mount=$kvMount swarm/nomad-b
 
       $mgmtToken = $null
       if ($existingMgmt -and $existingMgmt.Length -ge 36) {
-        $mgmtToken = $existingMgmt
-        $tokenPrefix = $mgmtToken.Substring(0, [Math]::Min(8, $mgmtToken.Length))
-        Write-Host "[nomad-acl] Stage 3 -- reusing existing management token from Vault KV (prefix $tokenPrefix...)"
-      } else {
-        Write-Host "[nomad-acl] Stage 3 -- KV management_token empty; bootstrapping from $leaderIp"
+        # VALIDATE the KV token against the LIVE cluster before trusting it
+        # (cold-rebuild fleet audit 2026-05-22 -- the documented manual KV-wipe
+        # BLOCKER): a destroy+apply re-clones the VMs (fresh nomad state) but
+        # the OLD token persists in Vault KV; blindly reusing it fails every
+        # subsequent ACL call. `nomad acl token self` resolves only if the
+        # token exists on the live cluster; otherwise it's stale -> re-bootstrap
+        # (works because the fresh cluster has never been bootstrapped).
+        $valScript = @"
+export VAULT_TOKEN='$rootToken'
+NOMAD_TOKEN='$existingMgmt' $nomadEnv nomad acl token self 2>&1 || true
+"@
+        $valB64 = [Convert]::ToBase64String([System.Text.UTF8Encoding]::new($false).GetBytes(($valScript -replace "`r`n", "`n")))
+        $valOut = (ssh @sshOpts "$sshUser@$leaderIp" "echo '$valB64' | base64 -d | bash" 2>&1 | Out-String)
+        if ($valOut -match 'Accessor ID' -or $valOut -match 'Secret ID') {
+          $mgmtToken = $existingMgmt
+          $tokenPrefix = $mgmtToken.Substring(0, [Math]::Min(8, $mgmtToken.Length))
+          Write-Host "[nomad-acl] Stage 3 -- KV management token validated against live cluster (prefix $tokenPrefix...); reusing"
+        } else {
+          Write-Host "[nomad-acl] Stage 3 -- KV management token is STALE (failed self-validation on the live cluster -- destroy+rebuild leftover); discarding + re-bootstrapping"
+        }
+      }
+      if (-not $mgmtToken) {
+        Write-Host "[nomad-acl] Stage 3 -- bootstrapping management token from $leaderIp"
         $bootstrapOut = (ssh @sshOpts "$sshUser@$leaderIp" "$nomadEnv nomad acl bootstrap -json" 2>&1 | Out-String).Trim()
 
         if ($bootstrapOut -match 'no longer allowed|already bootstrapped') {
