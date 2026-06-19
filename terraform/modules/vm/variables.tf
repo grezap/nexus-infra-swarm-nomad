@@ -66,5 +66,5 @@ variable "memory_mb" {
 variable "vmrun_path" {
   description = "Absolute path to vmrun.exe."
   type        = string
-  default     = "C:/Program Files (x86)/VMware/VMware Workstation/vmrun.exe"
+  default     = "C:/Program Files/VMware/VMware Workstation/vmrun.exe"
 }
