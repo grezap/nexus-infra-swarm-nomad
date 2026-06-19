@@ -11,7 +11,8 @@
  *     /var/lib/portainer-data:/data (the NFS share from 0.E.4a),
  *     /etc/portainer/tls:/certs:ro (the cert+key from 0.E.4b),
  *     /etc/portainer/admin-password.txt:/run/secrets/admin-pw:ro (the
- *     bcrypt hash from 0.E.4d). Command:
+ *     PLAINTEXT admin password from 0.E.4d -- `--admin-password-file` hashes
+ *     it internally). Command:
  *       --ssl --sslcert /certs/server.crt --sslkey /certs/server.key
  *       --admin-password-file /run/secrets/admin-pw
  *
@@ -65,7 +66,7 @@ resource "null_resource" "portainer_stack" {
     tls_id            = length(null_resource.portainer_tls) > 0 ? null_resource.portainer_tls[0].id : "disabled"
     admin_render_id   = length(null_resource.portainer_admin_render) > 0 ? null_resource.portainer_admin_render[0].id : "disabled"
     image_version     = var.portainer_image_version
-    portainer_stack_v = "1" # v1 = original (compose v3.8 with server [1 replica, manager-pin] + agent [global]; bind-mounts NFS data, TLS certs, admin-password file; HTTPS:9443).
+    portainer_stack_v = "2" # v2 (2026-06-19) = post-deploy reconcile: self-heal a stale NFS boltdb (re-init from the plaintext --admin-password-file when the KV plaintext fails to auth -- the boltdb persists on the gateway NFS across a swarm rebuild, so a Vault greenfield re-seed otherwise leaves the admin desynced) + idempotently register the local-swarm agent environment (tcp://tasks.agent:9001, TLS-skip). v1 = original (compose v3.8 with server [1 replica, manager-pin] + agent [global]; bind-mounts NFS data, TLS certs, admin-password file; HTTPS:9443).
   }
 
   depends_on = [null_resource.portainer_nfs_mount, null_resource.portainer_tls, null_resource.portainer_admin_render]
@@ -180,6 +181,46 @@ for i in `$(seq 1 24); do
   fi
   sleep 5
 done
+
+echo '--- reconcile admin password (self-heal a stale NFS boltdb) ---'
+# Portainer's boltdb lives on the gateway NFS share (/var/lib/portainer-data),
+# so it PERSISTS across a swarm destroy/apply. --admin-password-file is only
+# consumed at first-init, so if the persisted admin was set from an OLDER KV
+# seed (e.g. before a Vault greenfield re-seed), the current KV plaintext won't
+# authenticate. Detect that and re-init from the (plaintext) file. Idempotent:
+# when auth already works this is a no-op.
+PW=`$(sudo cat /etc/portainer/admin-password.txt 2>/dev/null)
+authcode() { curl -sk -o /dev/null -w '%%{http_code}' --max-time 8 -X POST https://127.0.0.1:9443/api/auth -H 'Content-Type: application/json' --data "{\"username\":\"admin\",\"password\":\"`$1\"}"; }
+CODE=000
+for i in `$(seq 1 6); do CODE=`$(authcode "`$PW"); [ "`$CODE" = "200" ] && break; sleep 5; done
+if [ "`$CODE" != "200" ]; then
+  echo "[reconcile] admin auth failed (`$CODE) -- stale boltdb; re-initializing from --admin-password-file"
+  sudo docker service scale portainer_server=0
+  for i in `$(seq 1 20); do R=`$(sudo docker service ls --filter name=portainer_server --format '{{.Replicas}}'); [ "`$R" = "0/0" ] && break; sleep 3; done
+  sudo cp -a /var/lib/portainer-data/portainer.db /var/lib/portainer-data/portainer.db.bak-`$(date -u +%Y%m%d-%H%M%S) 2>/dev/null || true
+  sudo rm -f /var/lib/portainer-data/portainer.db
+  sudo docker service scale portainer_server=1
+  for i in `$(seq 1 24); do R=`$(sudo docker service ls --filter name=portainer_server --format '{{.Replicas}}'); [ "`$R" = "1/1" ] && break; sleep 5; done
+  sleep 5
+  for i in `$(seq 1 6); do CODE=`$(authcode "`$PW"); [ "`$CODE" = "200" ] && break; sleep 5; done
+  echo "[reconcile] post-reset admin auth: `$CODE"
+fi
+
+echo '--- ensure the local Swarm agent environment is registered (idempotent) ---'
+JWT=`$(curl -sk --max-time 8 -X POST https://127.0.0.1:9443/api/auth -H 'Content-Type: application/json' --data "{\"username\":\"admin\",\"password\":\"`$PW\"}" | jq -r '.jwt // empty')
+if [ -n "`$JWT" ]; then
+  EPC=`$(curl -sk --max-time 8 https://127.0.0.1:9443/api/endpoints -H "Authorization: Bearer `$JWT" | jq 'length')
+  if [ "`$EPC" = "0" ]; then
+    echo "[reconcile] registering local-swarm agent environment (tcp://tasks.agent:9001)"
+    curl -sk --max-time 25 -X POST https://127.0.0.1:9443/api/endpoints -H "Authorization: Bearer `$JWT" \
+      --data-urlencode 'Name=local-swarm' --data-urlencode 'EndpointCreationType=2' \
+      --data-urlencode 'URL=tcp://tasks.agent:9001' --data-urlencode 'TLS=true' \
+      --data-urlencode 'TLSSkipVerify=true' --data-urlencode 'TLSSkipClientVerify=true' \
+      -o /dev/null -w '[reconcile] endpoint create http %%{http_code}\n'
+  else
+    echo "[reconcile] portainer environments already registered (`$EPC)"
+  fi
+fi
 
 echo '--- final service state ---'
 sudo docker service ls --filter label=com.nexusplatform.component

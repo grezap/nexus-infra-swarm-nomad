@@ -29,8 +29,9 @@
   0.E.4d (admin password seed + render + stack deploy):
     - vault-1: nexus/portainer/admin-bcrypt has bcrypt_hash + plaintext
       fields populated.
-    - Per-manager: /etc/portainer/admin-password.txt rendered with a
-      bcrypt-shaped hash (^\$2[aby]\$10\$).
+    - Per-manager: /etc/portainer/admin-password.txt rendered with the
+      plaintext admin password (^[A-Za-z0-9]{12,}$) -- Portainer's
+      --admin-password-file hashes the file content, so it must be plaintext.
     - manager-1: docker stack ls shows `portainer`; service ls shows
       portainer_server (1/1) + portainer_agent (6/6 global).
     - manager-1: HTTPS GET /api/system/status on 9443 returns 200 with
@@ -225,8 +226,11 @@ Test-Check -Description "vault-1: nexus/portainer/admin-bcrypt has bcrypt_hash +
 } | Out-Null
 
 foreach ($ip in $managerIps) {
-    Test-Check -Description "$ip : /etc/portainer/admin-password.txt rendered with bcrypt hash" -Probe {
-        $out = Invoke-RemoteCommand -Ip $ip -Command "sudo grep -E '^[\\\$]2[aby][\\\$][0-9]{2}[\\\$]' /etc/portainer/admin-password.txt >/dev/null 2>&1 && echo OK"
+    Test-Check -Description "$ip : /etc/portainer/admin-password.txt rendered with plaintext admin password" -Probe {
+        # Portainer's --admin-password-file reads the file as the PLAINTEXT
+        # password (it bcrypts internally); the render overlay (v3) writes the
+        # 24-char alphanumeric plaintext, NOT a bcrypt hash (the v2 bug).
+        $out = Invoke-RemoteCommand -Ip $ip -Command "sudo grep -qE '^[A-Za-z0-9]{12,}$' /etc/portainer/admin-password.txt && echo OK"
         $out -match '^OK$'
     } | Out-Null
 }

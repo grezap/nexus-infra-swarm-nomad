@@ -113,7 +113,7 @@ resource "null_resource" "nomad_acl" {
     ]))
     nomad_tls_id  = length(null_resource.nomad_tls) > 0 ? null_resource.nomad_tls[0].id : "disabled"
     kv_mount_path = var.vault_kv_mount_path
-    nomad_acl_v   = "2" # v2 = drop Stage 4b (Vault Agent template that rendered 50-acl-token.hcl) + drop Stage 5 (rolling restart to load that token). Nomad's `acl{}` block does NOT support a `token` field -- v1's rendered file caused `acl unexpected keys token` parse errors crashlooping nomad.service on all 6 nodes. The actual Nomad architecture: agents authenticate inter-agent RPC via the mTLS cert from 0.E.3.1 (cert SAN is the identity); agent ACL tokens are only needed when the agent's HTTP API is called locally (operator-style, not agent-internal). So we keep Stage 4 (create shared `nomad-agent` policy + 6 per-host operator tokens persisted to Vault KV at `nexus/swarm/nomad-agent-tokens/<host>`) for future operator scripting, but skip the rendering + restart entirely. v1 = original 5-stage; broke at Stage 5 when nomad failed to parse the rendered token file.
+    nomad_acl_v   = "3" # v3 (2026-06-20) = Stage 4 self-validates the KV agent token against the LIVE Nomad (mirrors Stage 3's mgmt-token validation) before "reusing" it. Same cold-rebuild bug fixed in consul-acl v6: Vault KV persists across a swarm destroy/apply while Nomad is rebuilt fresh, so a cold rebuild "reused" stale KV tokens and never created the 6 agent tokens in the new Nomad (smoke 0.E.3.2 "1 mgmt + 6 agent" failed). [[feedback_cold_rebuild_stale_kv_tokens]]. v2 = drop Stage 4b (Vault Agent template that rendered 50-acl-token.hcl) + drop Stage 5 (rolling restart to load that token). Nomad's `acl{}` block does NOT support a `token` field -- v1's rendered file caused `acl unexpected keys token` parse errors crashlooping nomad.service on all 6 nodes. The actual Nomad architecture: agents authenticate inter-agent RPC via the mTLS cert from 0.E.3.1 (cert SAN is the identity); agent ACL tokens are only needed when the agent's HTTP API is called locally (operator-style, not agent-internal). So we keep Stage 4 (create shared `nomad-agent` policy + 6 per-host operator tokens persisted to Vault KV at `nexus/swarm/nomad-agent-tokens/<host>`) for future operator scripting, but skip the rendering + restart entirely. v1 = original 5-stage; broke at Stage 5 when nomad failed to parse the rendered token file.
   }
 
   depends_on = [null_resource.swarm_vault_agent, null_resource.nomad_tls]
@@ -415,7 +415,22 @@ $vaultEnvBase vault kv get -field=agent_token -mount=$kvMount swarm/nomad-agent-
         $existing = (ssh @sshOpts "$sshUser@$vaultIp" "echo '$kvProbeB64' | base64 -d | bash" 2>&1 | Out-String).Trim()
 
         if ($existing -and $existing.Length -ge 36) {
-          return @{ Host = $hostName; Status = 'reused'; Error = $null }
+          # Self-validate the KV token against the LIVE Nomad cluster (mirrors
+          # Stage 3's mgmt-token validation). On a COLD REBUILD the Nomad
+          # cluster is brand-new but Vault KV PERSISTS, so a KV-present token
+          # may not exist in the fresh Nomad -- reuse only if `token self`
+          # resolves, else fall through to re-create (overwriting stale KV).
+          # Without this, a cold rebuild leaves Nomad with only the mgmt token
+          # and the smoke "1 mgmt + 6 agent" count fails. [[feedback_cold_rebuild_stale_kv_tokens]]
+          $valScript = @"
+NOMAD_TOKEN='$existing' $nomadEnv nomad acl token self 2>&1 || true
+"@
+          $valB64 = [Convert]::ToBase64String([System.Text.UTF8Encoding]::new($false).GetBytes(($valScript -replace "`r`n", "`n")))
+          $valOut = (ssh @sshOpts "$sshUser@$leaderIp" "echo '$valB64' | base64 -d | bash" 2>&1 | Out-String)
+          if ($valOut -match 'Accessor ID' -or $valOut -match 'Secret ID') {
+            return @{ Host = $hostName; Status = 'reused'; Error = $null }
+          }
+          Write-Host "[nomad-acl] Stage 4 -- $hostName KV agent token is STALE (not present in the live Nomad -- cold-rebuild leftover); re-creating"
         }
 
         # Create token attached to nomad-agent policy.

@@ -81,7 +81,9 @@
  *     while KV is empty (bootstrap-without-persistence regression), we
  *     ABORT loudly -- recovery requires `consul acl bootstrap-reset` +
  *     manual ops, which we don't auto-perform.
- *   - Stage 4: per-host check on KV agent_token presence; skip create
+ *   - Stage 4: per-host check on KV agent_token presence AND self-validation
+ *     against the live Consul (token read -self); reuse only if it resolves,
+ *     else re-create (a cold rebuild has a fresh Consul but persisted KV). skip create
  *     if populated. Policy create is idempotent: `consul acl policy
  *     create` with an existing name returns the existing record's
  *     ID (we treat that as success).
@@ -123,7 +125,7 @@ resource "null_resource" "consul_acl" {
     ]))
     tls_id        = length(null_resource.consul_tls) > 0 ? null_resource.consul_tls[0].id : "disabled"
     kv_mount_path = var.vault_kv_mount_path
-    consul_acl_v  = "5" # v5 = anonymous-deny verify probe switches from `consul members` (returns empty under deny -- Consul filters node:read per node, returns empty array; doesn't actually error so a regex like 'Permission denied' never matches) to curl /v1/agent/self (requires agent:read; anonymous in deny-mode returns explicit HTTP 403 + permission-denied body -- single unambiguous signal). v4 = drop tokens.default from rendered 30-acl-token.hcl (was scope creep -- the local agent transparently falls back to tokens.default for un-tokenized API calls, which silently bypassed default_policy=deny enforcement and broke the in-overlay anonymous-deny verification probe; user spec called for tokens.agent only, so the cluster now requires explicit CONSUL_HTTP_TOKEN on every operator call). v3 = sudo on `test -s` in the Stage 4b render-wait probe (/etc/consul.d/ is mode 0750 root:consul; nexusadmin can't traverse so the bare `test -s` always failed EACCES and the probe reported MISSING -- looped to 90s timeout despite the file being correctly rendered). v2 = fix regex in Stage 4 policy verify (consul `policy read -format=json` emits `"ID": "<uuid>"` with space after colon, not `"ID":"<uuid>"` -- v1 regex never matched, treated successful policy create as failure on every host) + heredoc-piped probe in Stage 4b wait (PS double-quote string can't carry `\"` -- terminates string at the backslash; switched to heredoc-piped pattern). v1 = original (5-stage transition-mode pattern; allow-mode bootstrap then deny-mode rolling restart with rendered agent tokens).
+    consul_acl_v  = "6" # v6 (2026-06-20) = Stage 4 self-validates the KV agent token against the LIVE Consul (mirrors Stage 3's mgmt-token validation) before "reusing" it. THE BUG: Stage 4 idempotency was keyed on Vault-KV presence alone, but Vault KV persists across a swarm destroy/apply while the Consul cluster is rebuilt fresh -- so a cold rebuild "reused" stale KV agent tokens and never created the 6 agent policies/tokens in the new Consul (smoke 0.E.2.3 "6 agent-* policies / >=7 tokens" failed). Surfaced by the 2026-06-20 Portainer-fix cold rebuild (the FIRST swarm cold rebuild where the KV agent tokens already existed from a prior successful rebuild). Same class as [[feedback_cold_rebuild_stale_kv_tokens]]. v5 = anonymous-deny verify probe switches from `consul members` (returns empty under deny -- Consul filters node:read per node, returns empty array; doesn't actually error so a regex like 'Permission denied' never matches) to curl /v1/agent/self (requires agent:read; anonymous in deny-mode returns explicit HTTP 403 + permission-denied body -- single unambiguous signal). v4 = drop tokens.default from rendered 30-acl-token.hcl (was scope creep -- the local agent transparently falls back to tokens.default for un-tokenized API calls, which silently bypassed default_policy=deny enforcement and broke the in-overlay anonymous-deny verification probe; user spec called for tokens.agent only, so the cluster now requires explicit CONSUL_HTTP_TOKEN on every operator call). v3 = sudo on `test -s` in the Stage 4b render-wait probe (/etc/consul.d/ is mode 0750 root:consul; nexusadmin can't traverse so the bare `test -s` always failed EACCES and the probe reported MISSING -- looped to 90s timeout despite the file being correctly rendered). v2 = fix regex in Stage 4 policy verify (consul `policy read -format=json` emits `"ID": "<uuid>"` with space after colon, not `"ID":"<uuid>"` -- v1 regex never matched, treated successful policy create as failure on every host) + heredoc-piped probe in Stage 4b wait (PS double-quote string can't carry `\"` -- terminates string at the backslash; switched to heredoc-piped pattern). v1 = original (5-stage transition-mode pattern; allow-mode bootstrap then deny-mode rolling restart with rendered agent tokens).
   }
 
   depends_on = [null_resource.swarm_vault_agent, null_resource.consul_tls]
@@ -388,7 +390,24 @@ $vaultEnvBase vault kv get -field=agent_token -mount=$kvMount swarm/agent-tokens
         $existing = (ssh @sshOpts "$sshUser@$vaultIp" "echo '$kvProbeB64' | base64 -d | bash" 2>&1 | Out-String).Trim()
 
         if ($existing -and $existing.Length -ge 36) {
-          return @{ Host = $hostName; Status = 'reused'; Error = $null }
+          # Self-validate the KV agent token against the LIVE Consul cluster
+          # (mirrors Stage 3's mgmt-token validation). On a COLD REBUILD the
+          # Consul cluster is brand-new (no ACL tokens yet) but Vault KV
+          # PERSISTS -- so a KV-present agent token may not exist in the fresh
+          # Consul. Reuse only if it actually resolves via `token read -self`;
+          # otherwise fall through to re-create the policy + token (overwriting
+          # the stale KV value). Without this, a cold rebuild leaves the fresh
+          # Consul with zero agent policies/tokens. [[feedback_cold_rebuild_stale_kv_tokens]]
+          $valScript = @"
+set -euo pipefail
+$envPrefix CONSUL_HTTP_TOKEN='$existing' consul acl token read -self -format=json 2>&1 || true
+"@
+          $valB64 = [Convert]::ToBase64String([System.Text.UTF8Encoding]::new($false).GetBytes(($valScript -replace "`r`n", "`n")))
+          $valOut = (ssh @sshOpts "$sshUser@$leaderIp" "echo '$valB64' | base64 -d | bash" 2>&1 | Out-String).Trim()
+          if ($valOut -match '"SecretID"') {
+            return @{ Host = $hostName; Status = 'reused'; Error = $null }
+          }
+          Write-Host "[consul-acl] Stage 4 -- $hostName KV agent token is STALE (not present in the live Consul -- cold-rebuild leftover); re-creating policy + token"
         }
 
         # Create policy (idempotent: if it exists, `consul acl policy create`

@@ -1,15 +1,18 @@
 /*
  * role-overlay-portainer-admin-render.tf -- Phase 0.E.4d (managers only)
  *
- * Drops a Vault Agent template on each manager that renders the bcrypt-
- * hashed Portainer admin password from `nexus/portainer/admin-bcrypt`
+ * Drops a Vault Agent template on each manager that renders the PLAINTEXT
+ * Portainer admin password (field `plaintext`) from `nexus/portainer/admin-bcrypt`
  * (sticky-seeded by security env's role-overlay-vault-portainer-admin-
  * seed.tf) to /etc/portainer/admin-password.txt (mode 0640 root:root).
  *
  * The Portainer CE Server container will bind-mount this file as
  * /run/secrets/admin-pw:ro and consume it via the `--admin-password-file`
- * flag at startup. Portainer reads the file content as a bcrypt hash
- * directly (the leading `$2b$10$...` shape) -- no plaintext exchange.
+ * flag at startup. IMPORTANT: Portainer's `--admin-password-file` reads the
+ * file content as the PLAINTEXT password and bcrypts it internally (only the
+ * `--admin-password` CLI flag takes a pre-computed bcrypt hash). Writing the
+ * bcrypt hash here (the v2 bug) made Portainer bcrypt the bcrypt-string, so
+ * the KV plaintext never authenticated. Render the plaintext (v3, 2026-06-19).
  *
  * Pre-reqs:
  *   - 0.E.4d security-env apply landed (KV seeded + manager policy v6
@@ -43,7 +46,7 @@ resource "null_resource" "portainer_admin_render" {
     ]))
     portainer_tls_id = length(null_resource.portainer_tls) > 0 ? null_resource.portainer_tls[0].id : "disabled"
     kv_mount_path    = var.vault_kv_mount_path
-    admin_render_v   = "2" # v2 = template body switched from HCL inline-string syntax (`contents = "{{ with secret ... }}"`) to HCL heredoc (`contents = <<EOT ... EOT`). v1 used `@'...'@` PS literal here-string with leftover backtick-quote escapes from the @"..."@ pattern -- result was the file containing literal `\"` (backtick + quote) where HCL expected just `"`. Vault Agent rejected with `error loading "/etc/vault-agent/71-template-portainer-admin.hcl": At 2:65: illegal char`. Heredoc avoids the quoting problem entirely. v1 = original (broken inline-string syntax; all 3 managers crashlooped vault-agent).
+    admin_render_v   = "3" # v3 (2026-06-19) = render `.Data.data.plaintext` instead of `.Data.data.bcrypt_hash`. THE BUG: Portainer's `--admin-password-file` reads the file content as the PLAINTEXT password (Portainer bcrypts it internally); only the `--admin-password` CLI flag takes a pre-computed bcrypt hash. v2 wrote the bcrypt hash to the file, so Portainer bcrypted the bcrypt-string and the real admin password became the `$2b$...` string -- the KV plaintext (and the bcrypt string, and `admin`) all 401'd. Live-caught during the nexus-cli v0.8.2 SwarmAdapter close-out (the topology /api/endpoints enrichment couldn't authenticate). Fix = render the plaintext. v2 = template body switched from HCL inline-string syntax to HCL heredoc (fixed an illegal-char crashloop). v1 = original (broken inline-string syntax).
   }
 
   depends_on = [null_resource.swarm_vault_agent, null_resource.portainer_tls]
@@ -63,12 +66,12 @@ resource "null_resource" "portainer_admin_render" {
         $null
       ) | Where-Object { $_ -ne $null }
 
-      # Per-manager Vault Agent template body. Renders the bcrypt-hashed
+      # Per-manager Vault Agent template body. Renders the PLAINTEXT
       # admin password to /etc/portainer/admin-password.txt -- mode 0640
       # root:root so the dockerd process (running as root) can read but
       # nexusadmin can't traverse + cat. The Portainer Server container
       # bind-mounts this file at /run/secrets/admin-pw:ro and feeds it to
-      # `--admin-password-file`.
+      # `--admin-password-file` (which reads the file as plaintext + bcrypts it).
       #
       # NOTE: HCL heredoc syntax (`contents = <<EOT ... EOT`) is used
       # instead of inline-string syntax. Inline strings would require
@@ -80,14 +83,13 @@ resource "null_resource" "portainer_admin_render" {
       # Trailing newline: Vault Agent's HCL heredoc emits the content
       # as-is. The `{{- ... -}}` trim markers strip leading/trailing
       # whitespace around the secret call so the file ends up containing
-      # ONLY the bcrypt hash with no padding. Portainer reads the file
-      # content verbatim as the bcrypt hash; trailing whitespace would
-      # corrupt the comparison.
+      # ONLY the plaintext password with no padding. Trailing whitespace
+      # would become part of the password Portainer hashes -- corrupting login.
       $vaTmplBody = @'
 template {
   contents = <<EOT
 {{- with secret "KVMOUNT/data/portainer/admin-bcrypt" -}}
-{{ .Data.data.bcrypt_hash }}
+{{ .Data.data.plaintext }}
 {{- end -}}
 EOT
 
@@ -136,14 +138,15 @@ sudo systemctl restart nexus-vault-agent.service
         throw "[portainer-admin-render] Stage 1 failed on $($stage1Errors.Count) manager(s)"
       }
 
-      # Wait for /etc/portainer/admin-password.txt to render with a bcrypt-
-      # shaped hash (prefix $2a$, $2b$, or $2y$ followed by digits + dollar
-      # + 22-char salt + 31-char hash). Use sudo on test/grep -- /etc/
-      # portainer is mode 0755 but the file itself is 0640 root:root.
+      # Wait for /etc/portainer/admin-password.txt to render with the PLAINTEXT
+      # admin password (the seed generates a 24-char alphanumeric string; Portainer's
+      # --admin-password-file hashes the file content, so it must be plaintext NOT a
+      # bcrypt hash). Use sudo on test/grep -- /etc/portainer is mode 0755 but the
+      # file itself is 0640 root:root.
       $renderProbe = @'
 set -euo pipefail
 if sudo test -s /etc/portainer/admin-password.txt; then
-  if sudo grep -qE '^\$2[aby]\$[0-9]{2}\$' /etc/portainer/admin-password.txt; then
+  if sudo grep -qE '^[A-Za-z0-9]{12,}$' /etc/portainer/admin-password.txt; then
     echo OK
   else
     echo NOT_RENDERED
@@ -170,7 +173,7 @@ fi
         $stage1WaitErrors | ForEach-Object { Write-Host $_ -ForegroundColor Red }
         throw "[portainer-admin-render] render-wait failed on $($stage1WaitErrors.Count) manager(s)"
       }
-      Write-Host "[portainer-admin-render] OK -- /etc/portainer/admin-password.txt rendered with bcrypt hash on all 3 managers"
+      Write-Host "[portainer-admin-render] OK -- /etc/portainer/admin-password.txt rendered with the plaintext admin password on all 3 managers"
     PWSH
   }
 
