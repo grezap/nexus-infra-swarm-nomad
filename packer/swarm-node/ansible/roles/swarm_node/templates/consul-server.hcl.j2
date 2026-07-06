@@ -15,6 +15,15 @@ server                  = true
 bootstrap_expect        = 3
 ui_config { enabled     = true }
 
+# The swarm tier is normally powered OFF (base=6). Consul 1.16+ refuses to
+# rejoin raft that has been offline past server_rejoin_age_max (default 168h/7d)
+# — so a bring-up more than a week later leaves all 3 servers stuck `activating`
+# ("refusing to rejoin cluster ... consider wiping your data dir"). Raise it far
+# above any realistic off-window so the servers rejoin their own intact raft
+# (ACL state preserved) without a destructive data-dir wipe. See
+# memory feedback_swarm_consul_rejoin_age_freeze.md.
+server_rejoin_age_max   = "8760h"
+
 # Bind LAN gossip + Raft to VMnet10 backplane; expose API/DNS on both NICs
 bind_addr     = "@VMNET10_IP@"
 advertise_addr = "@VMNET10_IP@"

@@ -4,6 +4,17 @@ All notable changes to `nexus-infra-swarm-nomad` are documented here. The format
 
 ## [Unreleased]
 
+### Fixed (2026-07-06) — Consul `server_rejoin_age_max` baked into the server template (>7-day-off freeze)
+
+The swarm tier is normally powered OFF (base=6). Consul 1.16+ refuses to rejoin raft that has been offline
+past `server_rejoin_age_max` (default **168h/7d**) — so a bring-up more than a week later leaves all 3
+managers stuck `activating` (`"refusing to rejoin cluster ... consider wiping your data dir"`), and because
+`nexus status swarm` reads `docker node ls` (not consul) the outage is masked. **`consul-server.hcl.j2` now
+sets `server_rejoin_age_max = "8760h"`** so the servers rejoin their own intact raft (ACL state preserved) —
+the NON-destructive fix (wiping the data dir would orphan the ACL tokens). Proven live 2026-07-06 via a config
+override; this bakes it into the swarm-node template. See the nexus-cli batch-3 changelog (GAP #11 swarm restore)
++ memory `feedback_swarm_consul_rejoin_age_freeze.md`.
+
 ### Fixed (2026-06-20) — cold-rebuild stale-KV self-heal (proven via a full destroy→apply→smoke cold rebuild)
 
 A full swarm-tier cold rebuild (the FIRST where the Vault KV swarm tokens already existed from a prior successful rebuild) surfaced three latent cold-rebuild bugs, all the **same class**: a secret persisted in Vault KV (which survives a swarm destroy/apply) was "reused" on KV-presence alone, even though the live cluster was rebuilt fresh and no longer had it. All now self-validate against the live cluster and re-create if stale. Cold-rebuild-proven 2026-06-20: destroy → (desynced boltdb + stale KV tokens deliberately restored to recreate the failure) → `apply` auto-healed all three → `smoke 0.E.4e` ALL GREEN → KV-plaintext Portainer auth 200 + `nexus topology swarm` endpoint=1.
