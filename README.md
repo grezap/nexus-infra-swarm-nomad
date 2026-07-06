@@ -7,7 +7,7 @@
 [![Phase](https://img.shields.io/badge/phase-0.E%20fully%20closed%20%E2%80%A2%20cold--rebuildable-brightgreen)](./CHANGELOG.md)
 [![Release](https://img.shields.io/badge/release-v0.2.0-blue)](https://github.com/grezap/nexus-infra-swarm-nomad/releases/tag/v0.2.0)
 
-Tier-2 orchestration for the **NexusPlatform lab** (88 VMs built through Phase 0.L.4) — a 3+3 Docker Swarm cluster with co-located Nomad servers + Consul servers on the managers and Nomad/Consul clients on the workers, plus Portainer CE deployed as a clustered Swarm service. Sits on top of the [`nexus-infra-vmware`](https://github.com/grezap/nexus-infra-vmware) foundation (Vault, AD, gateway).
+Tier-2 orchestration for the **NexusPlatform lab** (140 VMs built through Phase 0.P) — a 3+3 Docker Swarm cluster with co-located Nomad servers + Consul servers on the managers and Nomad/Consul clients on the workers, plus Portainer CE deployed as a clustered Swarm service. Sits on top of the [`nexus-infra-vmware`](https://github.com/grezap/nexus-infra-vmware) foundation (Vault, AD, gateway).
 
 > **Canon:** This repo implements [Phase 0.E](https://github.com/grezap/nexus-platform-plan/blob/main/MASTER-PLAN.md) (line 151) of the NexusPlatform blueprint. Read [`nexus-platform-plan`](https://github.com/grezap/nexus-platform-plan) first.
 >
