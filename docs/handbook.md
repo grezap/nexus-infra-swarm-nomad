@@ -2,6 +2,8 @@
 
 Operator runbook for Phase 0.E (Tier-2 orchestration). Mirrors the structure of [`nexus-infra-vmware/docs/handbook.md`](https://github.com/grezap/nexus-infra-vmware/blob/main/docs/handbook.md).
 
+> **CA rollover (2026-07-04/05):** this tier is on the new Vault root — it was cold-rebuilt onto the v0.8.1-greenfield Vault PKI root (see CHANGELOG).
+
 ## §0 Prerequisites
 
 - **Build host:** Windows 11 Pro at `10.0.70.101` with VMware Workstation Pro, Packer 1.11+, Terraform 1.9+, OpenSSH client, ssh-agent loaded with the lab key (zero passphrase).

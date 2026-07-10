@@ -4,6 +4,14 @@ All notable changes to `nexus-infra-swarm-nomad` are documented here. The format
 
 ## [Unreleased]
 
+### Platform CA rollover — tier on the new Vault root (2026-07-04/05)
+
+The platform-wide Vault PKI CA rollover completed 2026-07-04/05. The swarm/Nomad tier is **on the new Vault
+root** — it was cold-rebuilt onto the v0.8.1-greenfield Vault PKI root via the handbook cold-rebuild canon
+(no source `.tf` changed), so every Swarm/Consul/Nomad/Portainer TLS channel now presents new-root leaf certs.
+Like every other tier, the swarm-nomad tier is on the new Vault root. (The 2026-06-19/20 Portainer + ACL
+self-heal fixes below were part of the same v0.8.1-greenfield re-seed work.)
+
 ### Fixed (2026-07-06) — Consul `server_rejoin_age_max` baked into the server template (>7-day-off freeze)
 
 The swarm tier is normally powered OFF (base=6). Consul 1.16+ refuses to rejoin raft that has been offline
